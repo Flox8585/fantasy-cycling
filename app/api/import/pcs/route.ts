@@ -218,7 +218,9 @@ function collectStageLinks($root: cheerio.CheerioAPI) {
     if (!abs) return
 
     // accepte plus de variantes PCS
-    const isSameRace = abs.includes(`/race/${parsed.slug}/${parsed.year}`)
+    if (!parsed) continue
+
+const isSameRace = abs.includes(`/race/${parsed.slug}/${parsed.year}`)
     const looksLikeStage =
       /stage-\d+/i.test(abs) ||
       /prologue/i.test(abs) ||
