@@ -4,7 +4,14 @@ import { createSupabaseServerClient } from '../../../lib/supabase-server'
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
-type PointsRules = 'final_top3' | 'final_top5' | 'gc_top5' | 'gc_top10'
+type PointsRules = 'final_top3' | 'stage_top3' | 'final_top5' | 'gc_top5' | 'gc_top10'
+
+function topSizeFromQuestionType(questionType: PointsRules) {
+  if (questionType === 'final_top3' || questionType === 'stage_top3') return 3
+  if (questionType === 'final_top5' || questionType === 'gc_top5') return 5
+  if (questionType === 'gc_top10') return 10
+  return 0
+}
 
 function pointsForPick(opts: {
   questionType: PointsRules
@@ -13,32 +20,15 @@ function pointsForPick(opts: {
 }) {
   const { questionType, actualPos, predictedPos } = opts
   if (!actualPos) return 0
-  const exact = actualPos === predictedPos
 
-  if (questionType === 'final_top3') {
-    if (actualPos === 1 && predictedPos === 1) return 3
-    if (actualPos === 2 && predictedPos === 2) return 2
-    if (actualPos === 3 && predictedPos === 3) return 1
-    if (actualPos <= 3) return 1
-    return 0
-  }
+  const topSize = topSizeFromQuestionType(questionType)
+  if (!topSize) return 0
+  if (actualPos > topSize) return 0
 
-  if (questionType === 'final_top5' || questionType === 'gc_top5') {
-    if (actualPos === 1) return 5 + (exact ? 1 : 0)
-    if (actualPos <= 3) return 3 + (exact ? 1 : 0)
-    if (actualPos <= 5) return 1 + (exact ? 1 : 0)
-    return 0
-  }
+  const basePoints = topSize - actualPos + 1
+  const gap = Math.abs(predictedPos - actualPos)
 
-  if (questionType === 'gc_top10') {
-    if (actualPos === 1) return 10 + (exact ? 1 : 0)
-    if (actualPos <= 3) return 5 + (exact ? 1 : 0)
-    if (actualPos <= 5) return 3 + (exact ? 1 : 0)
-    if (actualPos <= 10) return 1 + (exact ? 1 : 0)
-    return 0
-  }
-
-  return 0
+  return Math.max(1, basePoints - gap)
 }
 
 export default async function RaceRankingPage(props: any) {
@@ -60,7 +50,6 @@ export default async function RaceRankingPage(props: any) {
     .eq('id', raceId)
     .single()
 
-  // Question principale (course) : active + la plus récente si multiple
   const { data: questions } = await supabase
     .from('prediction_questions')
     .select('id, race_id, stage_id, type, label, slots, is_active, created_at')
@@ -85,11 +74,11 @@ export default async function RaceRankingPage(props: any) {
     )
   }
 
-  // Résultats (peuvent être partiels si course pas finie)
   const { data: results } = await supabase
     .from('results')
-    .select('rider_id, position, riders ( id, name, team )')
+    .select('rider_id, position, riders ( id, name, team ), stage_id')
     .eq('race_id', raceId)
+    .is('stage_id', null)
     .order('position', { ascending: true })
     .limit(50)
 
@@ -99,7 +88,6 @@ export default async function RaceRankingPage(props: any) {
     if (rr?.rider_id && rr?.position) actualPosByRider.set(rr.rider_id, rr.position)
   }
 
-  // Pronos de tous (entries) pour cette question
   const { data: entries } = await supabase
     .from('prediction_entries')
     .select('question_id, user_id, rider_id, position, riders ( id, name, team )')
@@ -107,7 +95,6 @@ export default async function RaceRankingPage(props: any) {
     .order('user_id', { ascending: true })
     .order('position', { ascending: true })
 
-  // Pseudos
   const { data: profiles } = await supabase
     .from('profiles')
     .select('id, username')
@@ -119,7 +106,6 @@ export default async function RaceRankingPage(props: any) {
     }
   }
 
-  // Group entries by user
   type PickRow = {
     riderId: string
     riderName: string
@@ -156,7 +142,6 @@ export default async function RaceRankingPage(props: any) {
     picksByUser.get(ee.user_id)!.push(row)
   }
 
-  // Build scoreboard per user
   const users = Array.from(picksByUser.entries()).map(([userId, picks]) => {
     const total = picks.reduce((s, p) => s + p.points, 0)
     return {
@@ -177,11 +162,16 @@ export default async function RaceRankingPage(props: any) {
         <Link className="opacity-70 underline" href="/ranking">
           ← Retour classement
         </Link>
-        {race?.pcs_url ? (
-          <a className="opacity-70 underline" href={race.pcs_url} target="_blank" rel="noreferrer">
-            Voir PCS
-          </a>
-        ) : null}
+        <div className="flex gap-4 items-center">
+          <Link className="opacity-70 underline" href="/rules">
+            Règles
+          </Link>
+          {race?.pcs_url ? (
+            <a className="opacity-70 underline" href={race.pcs_url} target="_blank" rel="noreferrer">
+              Voir PCS
+            </a>
+          ) : null}
+        </div>
       </div>
 
       <h1 className="text-3xl font-bold mt-4">
@@ -192,12 +182,11 @@ export default async function RaceRankingPage(props: any) {
       </p>
 
       <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Résultat */}
         <section className="border rounded-lg p-4">
           <h2 className="text-xl font-semibold">Résultat (actuel)</h2>
           {!hasResults ? (
             <p className="mt-3 opacity-70">
-              Aucun résultat importé pour l’instant (ou course pas encore importée).
+              Aucun résultat importé pour l’instant.
             </p>
           ) : (
             <div className="mt-3 space-y-2">
@@ -207,21 +196,15 @@ export default async function RaceRankingPage(props: any) {
                     <div className="w-7 text-center font-semibold opacity-70">#{r.position}</div>
                     <div>
                       <div className="font-medium">{r.riders?.name ?? '—'}</div>
-                      {r.riders?.team ? (
-                        <div className="opacity-60">{r.riders.team}</div>
-                      ) : null}
+                      {r.riders?.team ? <div className="opacity-60">{r.riders.team}</div> : null}
                     </div>
                   </div>
                 </div>
               ))}
-              <p className="text-xs opacity-60 mt-3">
-                (Si la course n’est pas terminée, ce classement peut être incomplet → points partiels.)
-              </p>
             </div>
           )}
         </section>
 
-        {/* Score course */}
         <section className="border rounded-lg p-4">
           <h2 className="text-xl font-semibold">Classement sur la course</h2>
 
@@ -243,11 +226,10 @@ export default async function RaceRankingPage(props: any) {
         </section>
       </div>
 
-      {/* Détail pronos */}
       <div className="mt-10">
         <h2 className="text-xl font-semibold">Pronostics & points (détail)</h2>
         <p className="text-sm opacity-70 mt-1">
-          Tu peux comparer la position prévue, la position réelle (si dispo) et les points gagnés.
+          Plus un coureur finit haut, plus il rapporte. Si ton prono est proche de sa vraie place, tu gagnes davantage. Un coureur dans le top demandé rapporte au moins 1 point.
         </p>
 
         <div className="mt-4 space-y-3">
@@ -292,10 +274,6 @@ export default async function RaceRankingPage(props: any) {
                         ))}
                     </tbody>
                   </table>
-
-                  <p className="text-xs opacity-60 mt-3">
-                    “Réel —” = pas encore dans les résultats importés → 0 point pour l’instant.
-                  </p>
                 </div>
               )}
             </details>

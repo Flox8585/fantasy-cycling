@@ -8,6 +8,13 @@ export const revalidate = 0
 
 type PointsRules = 'stage_top3' | 'final_top3' | 'final_top5' | 'gc_top5' | 'gc_top10'
 
+function topSizeFromQuestionType(questionType: PointsRules) {
+  if (questionType === 'stage_top3' || questionType === 'final_top3') return 3
+  if (questionType === 'final_top5' || questionType === 'gc_top5') return 5
+  if (questionType === 'gc_top10') return 10
+  return 0
+}
+
 function pointsForPick(opts: {
   questionType: PointsRules
   actualPos: number | null
@@ -15,32 +22,15 @@ function pointsForPick(opts: {
 }) {
   const { questionType, actualPos, predictedPos } = opts
   if (!actualPos) return 0
-  const exact = actualPos === predictedPos
 
-  if (questionType === 'stage_top3' || questionType === 'final_top3') {
-    if (actualPos === 1 && predictedPos === 1) return 3
-    if (actualPos === 2 && predictedPos === 2) return 2
-    if (actualPos === 3 && predictedPos === 3) return 1
-    if (actualPos <= 3) return 1
-    return 0
-  }
+  const topSize = topSizeFromQuestionType(questionType)
+  if (!topSize) return 0
+  if (actualPos > topSize) return 0
 
-  if (questionType === 'final_top5' || questionType === 'gc_top5') {
-    if (actualPos === 1) return 5 + (exact ? 1 : 0)
-    if (actualPos <= 3) return 3 + (exact ? 1 : 0)
-    if (actualPos <= 5) return 1 + (exact ? 1 : 0)
-    return 0
-  }
+  const basePoints = topSize - actualPos + 1
+  const gap = Math.abs(predictedPos - actualPos)
 
-  if (questionType === 'gc_top10') {
-    if (actualPos === 1) return 10 + (exact ? 1 : 0)
-    if (actualPos <= 3) return 5 + (exact ? 1 : 0)
-    if (actualPos <= 5) return 3 + (exact ? 1 : 0)
-    if (actualPos <= 10) return 1 + (exact ? 1 : 0)
-    return 0
-  }
-
-  return 0
+  return Math.max(1, basePoints - gap)
 }
 
 export default async function StagePage(props: any) {
@@ -71,7 +61,6 @@ export default async function StagePage(props: any) {
     !!user?.email &&
     (admins.length === 0 || admins.includes(user.email.toLowerCase()))
 
-  // ---- Stage ----
   const { data: stage } = await supabase
     .from('stages')
     .select('*')
@@ -95,7 +84,6 @@ export default async function StagePage(props: any) {
     .eq('id', raceId)
     .single()
 
-  // ---- Question étape ----
   const { data: question } = await supabase
     .from('prediction_questions')
     .select('*')
@@ -110,7 +98,6 @@ export default async function StagePage(props: any) {
 
   const locked = !!question?.locked || lockedByTime
 
-  // ---- Riders / startlist ----
   const { data: rr } = await supabase
     .from('race_riders')
     .select('rider_id, riders ( id, name, team )')
@@ -142,7 +129,6 @@ export default async function StagePage(props: any) {
 
   const riderCount = rr?.length ?? 0
 
-  // ---- Mes picks ----
   const { data: myEntries } =
     user && question?.id
       ? await supabase
@@ -153,7 +139,6 @@ export default async function StagePage(props: any) {
           .order('position')
       : { data: [] as any[] }
 
-  // ---- Résultats étape ----
   const { data: results } = await supabase
     .from('results')
     .select('rider_id, position, riders ( id, name, team )')
@@ -167,7 +152,6 @@ export default async function StagePage(props: any) {
     if (rr?.rider_id && rr?.position) actualPosByRider.set(rr.rider_id, rr.position)
   }
 
-  // ---- Tous les pronos de l'étape ----
   const { data: entries } = question?.id
     ? await supabase
         .from('prediction_entries')
@@ -274,6 +258,9 @@ export default async function StagePage(props: any) {
           <Link href="/ranking" className="underline opacity-80">
             Classement
           </Link>
+          <Link href="/rules" className="underline opacity-80">
+            Règles
+          </Link>
         </div>
       </div>
 
@@ -350,7 +337,7 @@ export default async function StagePage(props: any) {
       <div className="mt-10">
         <h2 className="text-xl font-semibold">Pronostics des joueurs</h2>
         <p className="text-sm opacity-70 mt-1">
-          Comparaison des picks avec le résultat réel de l’étape.
+          Un coureur dans le top demandé rapporte au moins 1 point. Plus il finit haut et plus ton prono est proche, plus tu marques.
         </p>
 
         <div className="mt-4 space-y-3">

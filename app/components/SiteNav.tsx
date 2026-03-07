@@ -8,6 +8,7 @@ const links = [
   { href: '/dashboard', label: 'Dashboard' },
   { href: '/races', label: 'Races' },
   { href: '/ranking', label: 'Classement' },
+  { href: '/rules', label: 'Règles' },
   { href: '/admin/import', label: 'Admin import' },
 ]
 
