@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import LogoutButton from './LogoutButton'
 
 const links = [
   { href: '/dashboard', label: 'Dashboard' },
@@ -13,12 +14,7 @@ const links = [
 export default function SiteNav() {
   const pathname = usePathname()
 
-  // on masque le menu sur login / auth
-  if (
-    pathname === '/' ||
-    pathname.startsWith('/login') ||
-    pathname.startsWith('/auth')
-  ) {
+  if (pathname === '/login' || pathname.startsWith('/auth')) {
     return null
   }
 
@@ -51,6 +47,10 @@ export default function SiteNav() {
             )
           })}
         </nav>
+
+        <div className="ml-auto">
+          <LogoutButton />
+        </div>
       </div>
     </header>
   )
