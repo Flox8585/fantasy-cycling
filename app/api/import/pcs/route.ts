@@ -108,6 +108,47 @@ function toParisTimestamptz(dateISO: string | null, hhmm: string | null) {
   return dt.toUTC().toISO()
 }
 
+function extractStageProfileImageFromStagePage(html: string) {
+  const $ = cheerio.load(html)
+
+  // On prend l'image de profil d'étape la plus probable
+  const candidates = [
+    'img[src*="profile"]',
+    'img[src*="stage"]',
+    'img[src*="route"]',
+    'img'
+  ]
+
+  for (const selector of candidates) {
+    const imgs = $(selector).toArray()
+
+    for (const img of imgs) {
+      const src = String($(img).attr('src') || '').trim()
+      if (!src) continue
+
+      const abs = absPcsUrl(src)
+      if (!abs) continue
+
+      // on évite les mini icônes / logos / drapeaux
+      const lower = abs.toLowerCase()
+      if (
+        lower.includes('flag') ||
+        lower.includes('logo') ||
+        lower.includes('team') ||
+        lower.includes('jersey') ||
+        lower.includes('avatar')
+      ) {
+        continue
+      }
+
+      return abs
+    }
+  }
+
+  return null
+}
+
+
 function extractRaceStartTimeFromHtml(html: string) {
   const $ = cheerio.load(html)
   const allText = $('body').text()
@@ -446,36 +487,58 @@ const isStageRace = stageLinks.size > 0
 for (const st of stagesToCreate) {
   const profileData = stageProfilesMap.get(st.stage_number)
 
-  const vertical_meters = profileData?.vertical_meters ?? null
-  const profile_score = profileData?.profile_score ?? null
-  const ps_final_25k = profileData?.ps_final_25k ?? null
+const vertical_meters = profileData?.vertical_meters ?? null
+const profile_score = profileData?.profile_score ?? null
+const ps_final_25k = profileData?.ps_final_25k ?? null
 
-  const inferredStageType =
-    profileData?.stage_type ??
-    inferStageTypeFromMetrics({
-      stageName: st.name,
-      verticalMeters: vertical_meters,
-      profileScore: profile_score,
-    })
+const inferredStageType =
+  profileData?.stage_type ??
+  inferStageTypeFromMetrics({
+    stageName: st.name,
+    verticalMeters: vertical_meters,
+    profileScore: profile_score,
+  })
 
-  const { data: stageRow } = await supabaseAdmin
-    .from('stages')
-    .upsert(
-      {
-        race_id: raceId,
-        stage_number: st.stage_number,
-        name: st.name,
-        start_time: null,
-        pcs_url: st.pcs_url,
-        pcs_date: null,
-        stage_type: inferredStageType,
-        vertical_meters,
-        profile_score,
-        ps_final_25k,
-        profile_image_url: profileData?.profile_image_url ?? null,
-      },
-      { onConflict: 'pcs_url' }
-    )
+// ✅ image propre par étape depuis /info/profiles
+let stageProfileImageUrl: string | null = null
+
+try {
+  const stageInfoProfilesUrl = `${raceUrl}/stage-${st.stage_number}/info/profiles`
+  const stageInfoResp = await fetchHtml(stageInfoProfilesUrl)
+
+  if (!stageInfoResp.looksBlocked) {
+    stageProfileImageUrl = extractStageProfileImageFromStagePage(stageInfoResp.html)
+  }
+} catch {
+  // ignore
+}
+
+// fallback éventuel vers l'image récupérée sur la page globale
+if (!stageProfileImageUrl) {
+  stageProfileImageUrl = profileData?.profile_image_url ?? null
+}
+
+const { data: stageRow } = await supabaseAdmin
+  .from('stages')
+  .upsert(
+    {
+      race_id: raceId,
+      stage_number: st.stage_number,
+      name: st.name,
+      start_time: null,
+      pcs_url: st.pcs_url,
+      pcs_date: null,
+      stage_type: inferredStageType,
+      vertical_meters,
+      profile_score,
+      ps_final_25k,
+      profile_image_url: stageProfileImageUrl,
+    },
+    { onConflict: 'pcs_url' }
+  )
+  .select('id, stage_number')
+  .single()
+
     .select('id, stage_number')
     .single()
 
