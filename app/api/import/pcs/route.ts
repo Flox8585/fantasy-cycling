@@ -539,9 +539,6 @@ const { data: stageRow } = await supabaseAdmin
   .select('id, stage_number')
   .single()
 
-    .select('id, stage_number')
-    .single()
-
   if (stageRow?.id) {
     createdStages.push(stageRow)
   }
