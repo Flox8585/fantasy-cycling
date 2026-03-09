@@ -149,10 +149,10 @@ export default async function MyPicksPage() {
     .from('results')
     .select('race_id, stage_id, rider_id, position')
 
-  const entries = (entriesRaw ?? []) as EntryRow[]
-  const races = (racesRaw ?? []) as RaceRow[]
-  const stages = (stagesRaw ?? []) as StageRow[]
-  const results = (resultsRaw ?? []) as ResultRow[]
+  const entries = entriesRaw ?? []
+const races = racesRaw ?? []
+const stages = stagesRaw ?? []
+const results = resultsRaw ?? []
 
   const raceMap = new Map<string, RaceRow>()
   const stageMap = new Map<string, StageRow>()
