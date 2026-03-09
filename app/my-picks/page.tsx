@@ -58,7 +58,10 @@ export default async function MyPicksPage() {
 
   for (const e of entries ?? []) {
 
-    const q = e.prediction_questions
+    const q = Array.isArray(e.prediction_questions)
+  ? e.prediction_questions[0]
+  : e.prediction_questions
+
     if (!q) continue
 
     const raceId = q.race_id
