@@ -17,8 +17,9 @@ function pointsForPick(opts: {
   questionType: PointsRules
   actualPos: number | null
   predictedPos: number
+  isStage: boolean
 }) {
-  const { questionType, actualPos, predictedPos } = opts
+  const { questionType, actualPos, predictedPos, isStage } = opts
   if (!actualPos) return 0
 
   const topSize = topSizeFromQuestionType(questionType)
@@ -28,91 +29,37 @@ function pointsForPick(opts: {
   const basePoints = topSize - actualPos + 1
   const gap = Math.abs(predictedPos - actualPos)
 
-  return Math.max(1, basePoints - gap)
+  let pts = Math.max(1, basePoints - gap)
+
+  if (isStage) {
+    pts = Math.floor(pts / 2)
+  }
+
+  return pts
 }
 
-export default async function RaceRankingPage(props: any) {
-  const supabase = await createSupabaseServerClient()
-  const params = await Promise.resolve(props.params)
-  const raceId = params?.raceId as string | undefined
+type PickRow = {
+  riderId: string
+  riderName: string
+  team: string | null
+  predictedPos: number
+  actualPos: number | null
+  points: number
+}
 
-  if (!raceId) {
-    return (
-      <main className="p-10">
-        <p className="text-red-400">raceId manquant.</p>
-      </main>
-    )
-  }
-
-  const { data: race } = await supabase
-    .from('races')
-    .select('id, name, pcs_year, pcs_url')
-    .eq('id', raceId)
-    .single()
-
-  const { data: questions } = await supabase
-    .from('prediction_questions')
-    .select('id, race_id, stage_id, type, label, slots, is_active, created_at')
-    .eq('race_id', raceId)
-    .is('stage_id', null)
-    .eq('is_active', true)
-    .order('created_at', { ascending: false })
-    .limit(1)
-
-  const q = questions?.[0] as any
-  if (!q?.id) {
-    return (
-      <main className="p-10 max-w-4xl">
-        <Link className="opacity-70 underline" href="/ranking">
-          ← Retour classement
-        </Link>
-        <h1 className="text-3xl font-bold mt-4">{race?.name ?? 'Course'}</h1>
-        <p className="mt-4 opacity-70">
-          Aucune question principale active pour cette course.
-        </p>
-      </main>
-    )
-  }
-
-  const { data: results } = await supabase
-    .from('results')
-    .select('rider_id, position, riders ( id, name, team ), stage_id')
-    .eq('race_id', raceId)
-    .is('stage_id', null)
-    .order('position', { ascending: true })
-    .limit(50)
+function buildSectionData(opts: {
+  question: any
+  results: any[]
+  entries: any[]
+  usernameByUser: Map<string, string>
+  isStage: boolean
+}) {
+  const { question, results, entries, usernameByUser, isStage } = opts
 
   const actualPosByRider = new Map<string, number>()
   for (const r of results ?? []) {
     const rr = r as any
     if (rr?.rider_id && rr?.position) actualPosByRider.set(rr.rider_id, rr.position)
-  }
-
-  const { data: entries } = await supabase
-    .from('prediction_entries')
-    .select('question_id, user_id, rider_id, position, riders ( id, name, team )')
-    .eq('question_id', q.id)
-    .order('user_id', { ascending: true })
-    .order('position', { ascending: true })
-
-  const { data: profiles } = await supabase
-    .from('profiles')
-    .select('id, username')
-
-  const usernameByUser = new Map<string, string>()
-  for (const p of profiles ?? []) {
-    if ((p as any).id && (p as any).username) {
-      usernameByUser.set((p as any).id, (p as any).username)
-    }
-  }
-
-  type PickRow = {
-    riderId: string
-    riderName: string
-    team: string | null
-    predictedPos: number
-    actualPos: number | null
-    points: number
   }
 
   const picksByUser = new Map<string, PickRow[]>()
@@ -124,9 +71,10 @@ export default async function RaceRankingPage(props: any) {
 
     const actualPos = actualPosByRider.get(ee.rider_id) ?? null
     const points = pointsForPick({
-      questionType: q.type as PointsRules,
+      questionType: question.type as PointsRules,
       actualPos,
       predictedPos: ee.position,
+      isStage,
     })
 
     const row: PickRow = {
@@ -154,43 +102,40 @@ export default async function RaceRankingPage(props: any) {
 
   users.sort((a, b) => b.total - a.total)
 
-  const hasResults = (results?.length ?? 0) > 0
+  return {
+    users,
+    hasResults: (results?.length ?? 0) > 0,
+  }
+}
+
+function RankingSection(props: {
+  title: string
+  subtitle?: string
+  results: any[]
+  users: {
+    userId: string
+    username: string
+    total: number
+    picks: PickRow[]
+  }[]
+  emptyResultsText: string
+}) {
+  const { title, subtitle, results, users, emptyResultsText } = props
 
   return (
-    <main className="p-10 max-w-5xl">
-      <div className="flex items-center justify-between gap-4">
-        <Link className="opacity-70 underline" href="/ranking">
-          ← Retour classement
-        </Link>
-        <div className="flex gap-4 items-center">
-          <Link className="opacity-70 underline" href="/rules">
-            Règles
-          </Link>
-          {race?.pcs_url ? (
-            <a className="opacity-70 underline" href={race.pcs_url} target="_blank" rel="noreferrer">
-              Voir PCS
-            </a>
-          ) : null}
-        </div>
-      </div>
+    <div className="mt-10">
+      <h2 className="text-xl font-semibold">{title}</h2>
+      {subtitle ? <p className="text-sm opacity-70 mt-1">{subtitle}</p> : null}
 
-      <h1 className="text-3xl font-bold mt-4">
-        {race?.name ?? 'Course'} {race?.pcs_year ? `(${race.pcs_year})` : ''}
-      </h1>
-      <p className="opacity-70 mt-1">
-        Question: <span className="font-medium opacity-100">{q.label}</span> — type: {q.type}
-      </p>
-
-      <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section className="border rounded-lg p-4">
-          <h2 className="text-xl font-semibold">Résultat (actuel)</h2>
-          {!hasResults ? (
-            <p className="mt-3 opacity-70">
-              Aucun résultat importé pour l’instant.
-            </p>
+          <h3 className="text-lg font-semibold">Résultat</h3>
+
+          {!results || results.length === 0 ? (
+            <p className="mt-3 opacity-70">{emptyResultsText}</p>
           ) : (
             <div className="mt-3 space-y-2">
-              {(results ?? []).slice(0, 20).map((r: any) => (
+              {results.slice(0, 20).map((r: any) => (
                 <div key={r.rider_id} className="flex items-center justify-between text-sm">
                   <div className="flex items-center gap-3">
                     <div className="w-7 text-center font-semibold opacity-70">#{r.position}</div>
@@ -206,10 +151,10 @@ export default async function RaceRankingPage(props: any) {
         </section>
 
         <section className="border rounded-lg p-4">
-          <h2 className="text-xl font-semibold">Classement sur la course</h2>
+          <h3 className="text-lg font-semibold">Classement joueurs</h3>
 
           {users.length === 0 ? (
-            <p className="mt-3 opacity-70">Aucun prono pour cette course.</p>
+            <p className="mt-3 opacity-70">Aucun prono pour cette section.</p>
           ) : (
             <div className="mt-3 space-y-2">
               {users.map((u, idx) => (
@@ -226,60 +171,234 @@ export default async function RaceRankingPage(props: any) {
         </section>
       </div>
 
-      <div className="mt-10">
-        <h2 className="text-xl font-semibold">Pronostics & points (détail)</h2>
-        <p className="text-sm opacity-70 mt-1">
-          Plus un coureur finit haut, plus il rapporte. Si ton prono est proche de sa vraie place, tu gagnes davantage. Un coureur dans le top demandé rapporte au moins 1 point.
-        </p>
+      <div className="mt-6">
+        <h3 className="text-lg font-semibold">Pronostics détaillés</h3>
 
-        <div className="mt-4 space-y-3">
+        <div className="mt-3 space-y-3">
           {users.map((u) => (
             <details key={u.userId} className="border rounded-lg p-3" open={users.length <= 2}>
               <summary className="cursor-pointer font-semibold">
                 {u.username} — <span className="opacity-80">{u.total} pts</span>
               </summary>
 
-              {u.picks.length === 0 ? (
-                <p className="mt-3 opacity-70">Aucun pick.</p>
-              ) : (
-                <div className="mt-3 overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="opacity-70">
-                      <tr>
-                        <th className="text-left py-2 pr-3">Prono</th>
-                        <th className="text-left py-2 pr-3">Coureur</th>
-                        <th className="text-left py-2 pr-3">Réel</th>
-                        <th className="text-right py-2">Pts</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {u.picks
-                        .sort((a, b) => a.predictedPos - b.predictedPos)
-                        .map((p) => (
-                          <tr key={`${u.userId}:${p.riderId}`} className="border-t border-white/10">
-                            <td className="py-2 pr-3 font-semibold">#{p.predictedPos}</td>
-                            <td className="py-2 pr-3">
-                              <div className="font-medium">{p.riderName}</div>
-                              {p.team ? <div className="opacity-60">{p.team}</div> : null}
-                            </td>
-                            <td className="py-2 pr-3">
-                              {p.actualPos ? (
-                                <span className="font-semibold">#{p.actualPos}</span>
-                              ) : (
-                                <span className="opacity-60">—</span>
-                              )}
-                            </td>
-                            <td className="py-2 text-right font-bold">{p.points}</td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="opacity-70">
+                    <tr>
+                      <th className="text-left py-2 pr-3">Prono</th>
+                      <th className="text-left py-2 pr-3">Coureur</th>
+                      <th className="text-left py-2 pr-3">Réel</th>
+                      <th className="text-right py-2">Pts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {u.picks
+                      .sort((a, b) => a.predictedPos - b.predictedPos)
+                      .map((p) => (
+                        <tr key={`${u.userId}:${p.riderId}`} className="border-t border-white/10">
+                          <td className="py-2 pr-3 font-semibold">#{p.predictedPos}</td>
+                          <td className="py-2 pr-3">
+                            <div className="font-medium">{p.riderName}</div>
+                            {p.team ? <div className="opacity-60">{p.team}</div> : null}
+                          </td>
+                          <td className="py-2 pr-3">
+                            {p.actualPos ? (
+                              <span className="font-semibold">#{p.actualPos}</span>
+                            ) : (
+                              <span className="opacity-60">—</span>
+                            )}
+                          </td>
+                          <td className="py-2 text-right font-bold">{p.points}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
             </details>
           ))}
         </div>
       </div>
+    </div>
+  )
+}
+
+export default async function RaceRankingPage(props: any) {
+  const supabase = await createSupabaseServerClient()
+  const params = await Promise.resolve(props.params)
+  const raceId = params?.raceId as string | undefined
+
+  if (!raceId) {
+    return (
+      <main className="p-10">
+        <p className="text-red-400">raceId manquant.</p>
+      </main>
+    )
+  }
+
+  const { data: race } = await supabase
+    .from('races')
+    .select('id, name, pcs_year, pcs_url, pcs_is_stage_race')
+    .eq('id', raceId)
+    .single()
+
+  const { data: stages } = await supabase
+    .from('stages')
+    .select('id, race_id, stage_number, name')
+    .eq('race_id', raceId)
+    .order('stage_number', { ascending: true })
+
+  const { data: questions } = await supabase
+    .from('prediction_questions')
+    .select('id, race_id, stage_id, type, label, slots, is_active, created_at')
+    .eq('race_id', raceId)
+    .eq('is_active', true)
+    .order('created_at', { ascending: false })
+
+  const { data: allResults } = await supabase
+    .from('results')
+    .select('race_id, stage_id, rider_id, position, riders ( id, name, team )')
+    .eq('race_id', raceId)
+
+  const { data: allEntries } = await supabase
+    .from('prediction_entries')
+    .select('question_id, user_id, rider_id, position, riders ( id, name, team )')
+
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, username')
+
+  const usernameByUser = new Map<string, string>()
+  for (const p of profiles ?? []) {
+    if ((p as any).id && (p as any).username) {
+      usernameByUser.set((p as any).id, (p as any).username)
+    }
+  }
+
+  const mainQuestion = (questions ?? []).find((q: any) => q.stage_id === null) as any
+
+  const gcResults = (allResults ?? []).filter((r: any) => !r.stage_id)
+  const gcEntries = mainQuestion
+    ? (allEntries ?? []).filter((e: any) => e.question_id === mainQuestion.id)
+    : []
+
+  const gcData = mainQuestion
+    ? buildSectionData({
+        question: mainQuestion,
+        results: gcResults,
+        entries: gcEntries,
+        usernameByUser,
+        isStage: false,
+      })
+    : { users: [], hasResults: false }
+
+  const stageBlocks = (stages ?? []).map((stage: any) => {
+    const stageQuestion = (questions ?? []).find((q: any) => q.stage_id === stage.id) as any
+    const stageResults = (allResults ?? []).filter((r: any) => r.stage_id === stage.id)
+    const stageEntries = stageQuestion
+      ? (allEntries ?? []).filter((e: any) => e.question_id === stageQuestion.id)
+      : []
+
+    const stageData = stageQuestion
+      ? buildSectionData({
+          question: stageQuestion,
+          results: stageResults,
+          entries: stageEntries,
+          usernameByUser,
+          isStage: true,
+        })
+      : { users: [], hasResults: false }
+
+    return {
+      stage,
+      stageQuestion,
+      stageResults,
+      stageData,
+    }
+  })
+
+  return (
+    <main className="p-10 max-w-5xl">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <Link className="opacity-70 underline" href="/ranking">
+            ← Retour classement
+          </Link>
+
+          <h1 className="text-3xl font-bold mt-4">
+            {race?.name ?? 'Course'} {race?.pcs_year ? `(${race.pcs_year})` : ''}
+          </h1>
+        </div>
+
+        <div className="flex gap-4 items-center">
+          <Link className="opacity-70 underline" href="/rules">
+            Règles
+          </Link>
+          {race?.pcs_url ? (
+            <a className="opacity-70 underline" href={race.pcs_url} target="_blank" rel="noreferrer">
+              Voir PCS
+            </a>
+          ) : null}
+        </div>
+      </div>
+
+      {mainQuestion ? (
+        <p className="opacity-70 mt-2">
+          Question principale : <span className="font-medium opacity-100">{mainQuestion.label}</span>
+        </p>
+      ) : null}
+
+      {mainQuestion ? (
+        <RankingSection
+          title="Classement général / course"
+          subtitle="Le GC et les courses d’un jour comptent à 100 %."
+          results={gcResults}
+          users={gcData.users}
+          emptyResultsText="Aucun résultat GC / course importé pour l’instant."
+        />
+      ) : (
+        <div className="mt-10 border rounded-lg p-4">
+          <p className="opacity-70">Aucune question principale active pour cette course.</p>
+        </div>
+      )}
+
+      {race?.pcs_is_stage_race ? (
+        <div className="mt-12">
+          <h2 className="text-2xl font-bold">Étapes</h2>
+          <p className="text-sm opacity-70 mt-1">
+            Les étapes comptent dans le classement global à 50 % des points normaux.
+          </p>
+
+          <div className="mt-4 space-y-8">
+            {stageBlocks.map(({ stage, stageQuestion, stageResults, stageData }) => (
+              <div key={stage.id} className="border rounded-lg p-4">
+                <div className="flex items-center justify-between gap-4 flex-wrap">
+                  <div>
+                    <h3 className="text-xl font-semibold">{stage.name}</h3>
+                    {stageQuestion ? (
+                      <p className="text-sm opacity-70 mt-1">{stageQuestion.label}</p>
+                    ) : (
+                      <p className="text-sm opacity-70 mt-1">Pas de question active pour cette étape.</p>
+                    )}
+                  </div>
+
+                  <Link href={`/stage/${stage.id}`} className="underline opacity-80 text-sm">
+                    Voir la page étape
+                  </Link>
+                </div>
+
+                {stageQuestion ? (
+                  <RankingSection
+                    title="Classement étape"
+                    results={stageResults}
+                    users={stageData.users}
+                    emptyResultsText="Aucun résultat importé pour cette étape."
+                  />
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </main>
   )
 }

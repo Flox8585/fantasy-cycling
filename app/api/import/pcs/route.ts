@@ -119,6 +119,125 @@ function extractRaceStartTimeFromHtml(html: string) {
   }
 }
 
+function extractInt(text: string) {
+  const m = String(text || '').replace(/\s+/g, '').match(/(\d+)/)
+  return m ? Number(m[1]) : null
+}
+
+function normalizeStageType(raw: string | null) {
+  const s = normalizeSpace(String(raw || '')).toLowerCase()
+
+  if (!s) return null
+  if (s.includes('mountain')) return 'mountain'
+  if (s.includes('hill')) return 'hilly'
+  if (s.includes('flat')) return 'flat'
+  if (s.includes('itt') || s.includes('ttt') || s.includes('time trial')) return 'itt'
+
+  return s
+}
+
+function extractStageProfilesFromRoutePage(html: string) {
+  const $ = cheerio.load(html)
+
+  const out = new Map<
+    number,
+    {
+      stage_type: string | null
+      vertical_meters: number | null
+      profile_score: number | null
+      ps_final_25k: number | null
+      profile_image_url: string | null
+    }
+  >()
+
+  // PCS "route/stage-profiles" : on parse le texte global bloc par bloc
+  // et on récupère aussi une image si présente dans le même bloc.
+  const bodyText = $('body').text()
+
+  // fallback text parsing bloc par étape
+  const re =
+    /Stage\s+(\d+)(?:\s*\(ITT\))?[\s\S]*?Vertical meters:\s*([\d\s]+)?[\s\S]*?ProfileScore:\s*([\d\s]+)?[\s\S]*?PS final 25k:\s*([\d\s]+)?/gi
+
+  let m: RegExpExecArray | null
+  while ((m = re.exec(bodyText)) !== null) {
+    const stageNumber = Number(m[1])
+    if (!stageNumber) continue
+
+    const vertical_meters = extractInt(m[2] || '')
+    const profile_score = extractInt(m[3] || '')
+    const ps_final_25k = extractInt(m[4] || '')
+
+    out.set(stageNumber, {
+      stage_type: null,
+      vertical_meters,
+      profile_score,
+      ps_final_25k,
+      profile_image_url: null,
+    })
+  }
+
+  // parse "profile type" filters and stage cards when available
+  // on cherche des blocs contenant "Stage X |"
+  $('body *').each((_, el) => {
+    const txt = normalizeSpace($(el).text())
+    const stageMatch = txt.match(/\bStage\s+(\d+)\b/i)
+    if (!stageMatch) return
+
+    const stageNumber = Number(stageMatch[1])
+    if (!stageNumber) return
+
+    const current = out.get(stageNumber) ?? {
+      stage_type: null,
+      vertical_meters: null,
+      profile_score: null,
+      ps_final_25k: null,
+      profile_image_url: null,
+    }
+
+    // type heuristique à partir du score / texte
+    // si l’élément contient "ITT"
+    if (!current.stage_type && /\bITT\b/i.test(txt)) {
+      current.stage_type = 'itt'
+    }
+
+    // image éventuelle
+    if (!current.profile_image_url) {
+      const img =
+        $(el).find('img').first().attr('src') ||
+        $(el).closest('div').find('img').first().attr('src')
+
+      if (img) {
+        current.profile_image_url = absPcsUrl(img)
+      }
+    }
+
+    out.set(stageNumber, current)
+  })
+
+  return out
+}
+
+function inferStageTypeFromMetrics(opts: {
+  stageName: string
+  verticalMeters: number | null
+  profileScore: number | null
+}) {
+  const { stageName, verticalMeters, profileScore } = opts
+  const name = normalizeSpace(stageName).toLowerCase()
+
+  if (name.includes('(itt)') || name.includes('itt') || name.includes('time trial')) {
+    return 'itt'
+  }
+
+  const vm = verticalMeters ?? 0
+  const ps = profileScore ?? 0
+
+  if (ps >= 180 || vm >= 3200) return 'mountain'
+  if (ps >= 45 || vm >= 1400) return 'hilly'
+  return 'flat'
+}
+
+
 async function fetchHtml(url: string): Promise<{
   html: string
   looksBlocked: boolean
@@ -249,6 +368,29 @@ if (stageLinks.size === 0) {
 }
 
 const isStageRace = stageLinks.size > 0
+// ---- Fetch route/stage-profiles page (best effort) ----
+    let stageProfilesMap = new Map<
+      number,
+      {
+        stage_type: string | null
+        vertical_meters: number | null
+        profile_score: number | null
+        ps_final_25k: number | null
+        profile_image_url: string | null
+      }
+    >()
+
+    if (isStageRace) {
+      try {
+        const routeProfilesResp = await fetchHtml(`${raceUrl}/route/stage-profiles`)
+        if (!routeProfilesResp.looksBlocked) {
+          stageProfilesMap = extractStageProfilesFromRoutePage(routeProfilesResp.html)
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     // ---- Extract race date/time from PCS (semi-auto) ----
     const raceTimes = extractRaceStartTimeFromHtml(raceResp.html)
 
@@ -302,6 +444,20 @@ const isStageRace = stageLinks.size > 0
     const createdStages: { id: string; stage_number: number }[] = []
 
 for (const st of stagesToCreate) {
+  const profileData = stageProfilesMap.get(st.stage_number)
+
+  const vertical_meters = profileData?.vertical_meters ?? null
+  const profile_score = profileData?.profile_score ?? null
+  const ps_final_25k = profileData?.ps_final_25k ?? null
+
+  const inferredStageType =
+    profileData?.stage_type ??
+    inferStageTypeFromMetrics({
+      stageName: st.name,
+      verticalMeters: vertical_meters,
+      profileScore: profile_score,
+    })
+
   const { data: stageRow } = await supabaseAdmin
     .from('stages')
     .upsert(
@@ -312,6 +468,11 @@ for (const st of stagesToCreate) {
         start_time: null,
         pcs_url: st.pcs_url,
         pcs_date: null,
+        stage_type: inferredStageType,
+        vertical_meters,
+        profile_score,
+        ps_final_25k,
+        profile_image_url: profileData?.profile_image_url ?? null,
       },
       { onConflict: 'pcs_url' }
     )
@@ -322,6 +483,7 @@ for (const st of stagesToCreate) {
     createdStages.push(stageRow)
   }
 }
+
 
 // ---- AUTO CREATE QUESTIONS ----
 

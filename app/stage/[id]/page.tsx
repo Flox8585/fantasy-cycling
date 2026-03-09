@@ -30,7 +30,42 @@ function pointsForPick(opts: {
   const basePoints = topSize - actualPos + 1
   const gap = Math.abs(predictedPos - actualPos)
 
-  return Math.max(1, basePoints - gap)
+  let pts = Math.max(1, basePoints - gap)
+
+  // Une étape vaut 50% des points
+  pts = Math.floor(pts / 2)
+
+  return pts
+}
+
+function stageTypeLabel(stageType: string | null | undefined) {
+  switch (stageType) {
+    case 'flat':
+      return 'Plaine'
+    case 'hilly':
+      return 'Vallon'
+    case 'mountain':
+      return 'Montagne'
+    case 'itt':
+      return 'CLM'
+    default:
+      return 'Type inconnu'
+  }
+}
+
+function stageTypeEmoji(stageType: string | null | undefined) {
+  switch (stageType) {
+    case 'flat':
+      return '💨'
+    case 'hilly':
+      return '⛰️'
+    case 'mountain':
+      return '🏔️'
+    case 'itt':
+      return '⏱️'
+    default:
+      return '•'
+  }
 }
 
 export default async function StagePage(props: any) {
@@ -228,25 +263,35 @@ export default async function StagePage(props: any) {
             {race?.name} — {stage.name}
           </h1>
 
-          <div className="mt-2 text-sm opacity-80">
-            {question ? (
-              <>
-                <span className="font-semibold">{question.label}</span>
+          <div className="mt-2 text-sm opacity-80 flex gap-3 flex-wrap items-center">
+            <span className="font-semibold">{question?.label ?? 'Pas de question'}</span>
 
-                {question.lock_at && (
-                  <span className="ml-2 opacity-70">
-                    lock auto: {new Date(question.lock_at).toLocaleString('fr-FR')}
-                  </span>
-                )}
+            <span className="rounded-full border px-3 py-1 text-xs">
+              {stageTypeEmoji(stage.stage_type)} {stageTypeLabel(stage.stage_type)}
+            </span>
 
-                {locked ? (
-                  <span className="ml-3 text-red-300 font-semibold">🔒 Verrouillé</span>
-                ) : (
-                  <span className="ml-3 text-green-300 font-semibold">🟢 Ouvert</span>
-                )}
-              </>
+            {stage.vertical_meters ? (
+              <span className="opacity-70">D+ : {stage.vertical_meters} m</span>
+            ) : null}
+
+            {stage.profile_score ? (
+              <span className="opacity-70">ProfileScore : {stage.profile_score}</span>
+            ) : null}
+
+            {stage.ps_final_25k ? (
+              <span className="opacity-70">PS final 25k : {stage.ps_final_25k}</span>
+            ) : null}
+
+            {question?.lock_at && (
+              <span className="opacity-70">
+                lock auto: {new Date(question.lock_at).toLocaleString('fr-FR')}
+              </span>
+            )}
+
+            {locked ? (
+              <span className="text-red-300 font-semibold">🔒 Verrouillé</span>
             ) : (
-              <span className="text-yellow-300">Pas de question pour cette étape.</span>
+              <span className="text-green-300 font-semibold">🟢 Ouvert</span>
             )}
           </div>
         </div>
@@ -263,6 +308,17 @@ export default async function StagePage(props: any) {
           </Link>
         </div>
       </div>
+
+      {stage.profile_image_url ? (
+        <div className="mt-6 border rounded-lg p-4">
+          <h2 className="text-lg font-semibold mb-3">Profil de l’étape</h2>
+          <img
+            src={stage.profile_image_url}
+            alt={`Profil ${stage.name}`}
+            className="w-full rounded-lg bg-white"
+          />
+        </div>
+      ) : null}
 
       {isAdmin && question?.id && (
         <AdminLockControls
@@ -337,7 +393,7 @@ export default async function StagePage(props: any) {
       <div className="mt-10">
         <h2 className="text-xl font-semibold">Pronostics des joueurs</h2>
         <p className="text-sm opacity-70 mt-1">
-          Un coureur dans le top demandé rapporte au moins 1 point. Plus il finit haut et plus ton prono est proche, plus tu marques.
+          Les étapes comptent à 50 % des points normaux dans le classement global.
         </p>
 
         <div className="mt-4 space-y-3">

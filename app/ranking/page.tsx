@@ -17,37 +17,40 @@ function pointsForPick(opts: {
   questionType: PointsRules
   actualPos: number | null
   predictedPos: number
+  isStage: boolean
 }) {
-  const { questionType, actualPos, predictedPos } = opts
+  const { questionType, actualPos, predictedPos, isStage } = opts
   if (!actualPos) return 0
 
   const topSize = topSizeFromQuestionType(questionType)
   if (!topSize) return 0
-
-  // hors top demandé => 0
   if (actualPos > topSize) return 0
 
-  // barème de base :
-  // top 5 => 1er=5, 2e=4, ..., 5e=1
-  // top 10 => 1er=10, ..., 10e=1
   const basePoints = topSize - actualPos + 1
-
-  // malus selon l'écart entre prono et réel
   const gap = Math.abs(predictedPos - actualPos)
 
-  // minimum 1 point si le coureur est bien dans le top demandé
-  return Math.max(1, basePoints - gap)
+  let pts = Math.max(1, basePoints - gap)
+
+  // Les étapes valent 50% des points
+  if (isStage) {
+    pts = Math.floor(pts / 2)
+  }
+
+  return pts
 }
 
 export default async function RankingPage() {
   const supabase = await createSupabaseServerClient()
 
+  const now = new Date()
+
   const { data: races } = await supabase
     .from('races')
-    .select('id, name, pcs_year')
-    .order('name')
+    .select('id, name, pcs_year, pcs_is_stage_race')
+    .order('pcs_year', { ascending: false })
+    .order('name', { ascending: true })
 
-  const raceById = new Map<string, { id: string; name: string; pcs_year: number | null }>()
+  const raceById = new Map<string, any>()
   for (const r of races ?? []) raceById.set((r as any).id, r as any)
 
   const { data: profiles } = await supabase
@@ -61,16 +64,26 @@ export default async function RankingPage() {
     }
   }
 
-  // on ne prend que la question principale active par course (GC/course)
   const { data: questions } = await supabase
     .from('prediction_questions')
-    .select('id, race_id, stage_id, type, label, slots, is_active, created_at')
+    .select('id, race_id, stage_id, type, label, slots, is_active, created_at, lock_at, locked')
     .eq('is_active', true)
-    .is('stage_id', null)
 
+  const { data: entries } = await supabase
+    .from('prediction_entries')
+    .select('question_id, user_id, rider_id, position')
+
+  const { data: results } = await supabase
+    .from('results')
+    .select('race_id, stage_id, rider_id, position')
+
+  // -------- Question principale par course (GC / course)
   const mainQuestionByRace = new Map<string, any>()
+
   for (const q of questions ?? []) {
     const qq = q as any
+    if (qq.stage_id) continue
+
     const prev = mainQuestionByRace.get(qq.race_id)
     if (!prev) {
       mainQuestionByRace.set(qq.race_id, qq)
@@ -81,30 +94,23 @@ export default async function RankingPage() {
     }
   }
 
-  const mainQuestions = Array.from(mainQuestionByRace.values())
-  const mainQuestionIds = mainQuestions.map((q: any) => q.id)
+  // -------- Map des résultats par race/stage/rider
+  const resultPosByKey = new Map<string, number>()
+  const hasGcResultsByRace = new Set<string>()
 
-  const { data: entries } = mainQuestionIds.length
-    ? await supabase
-        .from('prediction_entries')
-        .select('question_id, user_id, rider_id, position')
-        .in('question_id', mainQuestionIds)
-    : { data: [] as any[] }
-
-  const { data: results } = await supabase
-    .from('results')
-    .select('race_id, rider_id, position, stage_id')
-
-  const resultPosByRaceRider = new Map<string, number>()
   for (const r of results ?? []) {
     const rr = r as any
-    if (rr.race_id && rr.rider_id && rr.position && !rr.stage_id) {
-      resultPosByRaceRider.set(`${rr.race_id}:${rr.rider_id}`, rr.position)
+    const key = `${rr.race_id}:${rr.stage_id ?? 'gc'}:${rr.rider_id}`
+    resultPosByKey.set(key, rr.position)
+
+    if (!rr.stage_id && rr.race_id) {
+      hasGcResultsByRace.add(rr.race_id)
     }
   }
 
+  // -------- Score global = GC/course + étapes /2
   const qById = new Map<string, any>()
-  for (const q of mainQuestions) qById.set(q.id, q)
+  for (const q of questions ?? []) qById.set((q as any).id, q as any)
 
   const pointsByUser = new Map<string, number>()
   const pointsByRaceByUser = new Map<string, number>() // raceId:userId
@@ -114,20 +120,21 @@ export default async function RankingPage() {
     const q = qById.get(ee.question_id)
     if (!q) continue
 
-    const qType = q.type as PointsRules
     const raceId = q.race_id as string
-    const actualPos = resultPosByRaceRider.get(`${raceId}:${ee.rider_id}`) ?? null
+    const stageId = q.stage_id ?? 'gc'
+    const actualPos = resultPosByKey.get(`${raceId}:${stageId}:${ee.rider_id}`) ?? null
 
     const pts = pointsForPick({
-      questionType: qType,
+      questionType: q.type as PointsRules,
       actualPos,
       predictedPos: ee.position,
+      isStage: !!q.stage_id,
     })
 
     pointsByUser.set(ee.user_id, (pointsByUser.get(ee.user_id) ?? 0) + pts)
 
-    const k = `${raceId}:${ee.user_id}`
-    pointsByRaceByUser.set(k, (pointsByRaceByUser.get(k) ?? 0) + pts)
+    const raceUserKey = `${raceId}:${ee.user_id}`
+    pointsByRaceByUser.set(raceUserKey, (pointsByRaceByUser.get(raceUserKey) ?? 0) + pts)
   }
 
   const leaderboard = Array.from(pointsByUser.entries())
@@ -138,11 +145,84 @@ export default async function RankingPage() {
     }))
     .sort((a, b) => b.points - a.points)
 
-  const racesWithQuestions = mainQuestions
-    .map((q: any) => q.race_id as string)
-    .filter(Boolean)
+  // -------- Status des courses
+  type RaceStatus = 'open' | 'locked' | 'finished'
 
-  const uniqueRaceIds = Array.from(new Set(racesWithQuestions))
+  function getRaceStatus(raceId: string): RaceStatus {
+    const q = mainQuestionByRace.get(raceId)
+
+    const lockedByTime = q?.lock_at ? new Date(q.lock_at) <= now : false
+    const lockedManually = !!q?.locked
+    const locked = lockedByTime || lockedManually
+
+    const finished = hasGcResultsByRace.has(raceId)
+
+    if (finished) return 'finished'
+    if (locked) return 'locked'
+    return 'open'
+  }
+
+  const openRaces: any[] = []
+  const lockedRaces: any[] = []
+  const finishedRaces: any[] = []
+
+  for (const race of races ?? []) {
+    const rr = race as any
+    const status = getRaceStatus(rr.id)
+
+    if (status === 'open') openRaces.push(rr)
+    else if (status === 'locked') lockedRaces.push(rr)
+    else finishedRaces.push(rr)
+  }
+
+  function RaceSection(props: {
+    title: string
+    races: any[]
+    badge: string
+  }) {
+    const { title, races, badge } = props
+
+    if (!races.length) return null
+
+    return (
+      <div className="mt-10">
+        <h2 className="text-xl font-semibold mb-4">{title}</h2>
+
+        <div className="space-y-3">
+          {races.map((race) => {
+            const q = mainQuestionByRace.get(race.id)
+            return (
+              <details key={race.id} className="border rounded-lg p-3">
+                <summary className="cursor-pointer font-semibold flex items-center justify-between gap-4">
+                  <span>
+                    <Link className="underline" href={`/ranking/${race.id}`}>
+                      {race.name} {race.pcs_year ? `(${race.pcs_year})` : ''}
+                    </Link>
+                    {q ? <span className="opacity-70 text-sm"> — {q.type}</span> : null}
+                  </span>
+
+                  <span className="text-xs opacity-70">{badge}</span>
+                </summary>
+
+                <div className="mt-3 space-y-1 text-sm">
+                  {leaderboard.map((u) => {
+                    const k = `${race.id}:${u.userId}`
+                    const pts = pointsByRaceByUser.get(k) ?? 0
+                    return (
+                      <div key={k} className="flex items-center justify-between">
+                        <div className="opacity-80">{u.label}</div>
+                        <div className="font-semibold">{pts} pts</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </details>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <main className="p-10 max-w-4xl">
@@ -169,44 +249,9 @@ export default async function RankingPage() {
         </div>
       )}
 
-      <div className="mt-10">
-        <h2 className="text-xl font-semibold mb-3">Classement par course</h2>
-        <p className="text-sm opacity-70 mb-4">
-          On compte uniquement la question principale active de la course.
-        </p>
-
-        <div className="space-y-3">
-          {uniqueRaceIds.map((raceId) => {
-            const race = raceById.get(raceId)
-            const q = mainQuestionByRace.get(raceId)
-            if (!q) return null
-
-            return (
-              <details key={raceId} className="border rounded-lg p-3">
-                <summary className="cursor-pointer font-semibold">
-                  <Link className="underline" href={`/ranking/${raceId}`}>
-                    {race?.name ?? 'Course'} {race?.pcs_year ? `(${race.pcs_year})` : ''}
-                  </Link>
-                  <span className="opacity-70 text-sm"> — {q.type}</span>
-                </summary>
-
-                <div className="mt-3 space-y-1 text-sm">
-                  {leaderboard.map((u) => {
-                    const k = `${raceId}:${u.userId}`
-                    const pts = pointsByRaceByUser.get(k) ?? 0
-                    return (
-                      <div key={k} className="flex items-center justify-between">
-                        <div className="opacity-80">{u.label}</div>
-                        <div className="font-semibold">{pts} pts</div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </details>
-            )
-          })}
-        </div>
-      </div>
+      <RaceSection title="🟢 Courses ouvertes" races={openRaces} badge="OPEN" />
+      <RaceSection title="🔒 Courses verrouillées / en cours" races={lockedRaces} badge="LOCKED" />
+      <RaceSection title="🏁 Courses terminées" races={finishedRaces} badge="FINISHED" />
     </main>
   )
 }
