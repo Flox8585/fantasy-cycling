@@ -190,18 +190,21 @@ const results = resultsRaw ?? []
       isStage
     )
 
-    const pick: PickDisplay = {
-      questionId: e.question_id,
-      riderId: e.rider_id,
-      riderName: e.riders?.name ?? '—',
-      team: e.riders?.team ?? '',
-      predicted: e.position,
-      actual,
-      points,
-      type: q.type,
-      label: q.label ?? '',
-      isStage,
-    }
+    const rider = Array.isArray(e.riders) ? e.riders[0] : e.riders
+
+const pick: PickDisplay = {
+  questionId: e.question_id,
+  riderId: e.rider_id,
+  riderName: rider?.name ?? '—',
+  team: rider?.team ?? '',
+  predicted: e.position,
+  actual,
+  points,
+  type: q.type,
+  label: q.label ?? '',
+  isStage,
+}
+
 
     if (!byRace.has(raceId)) {
       byRace.set(raceId, new Map<string, PickDisplay[]>())
