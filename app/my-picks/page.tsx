@@ -34,7 +34,6 @@ function computePoints(
 
   let pts = Math.max(1, base - gap)
 
-  // Les étapes valent 50 % des points
   if (isStage) pts = Math.floor(pts / 2)
 
   return pts
@@ -49,6 +48,10 @@ type EntryRow = {
         name: string | null
         team: string | null
       }
+    | {
+        name: string | null
+        team: string | null
+      }[]
     | null
   prediction_questions:
     | {
@@ -57,6 +60,8 @@ type EntryRow = {
         stage_id: string | null
         type: PointsRules
         label: string | null
+        is_active: boolean | null
+        created_at: string | null
       }
     | {
         id: string
@@ -64,6 +69,8 @@ type EntryRow = {
         stage_id: string | null
         type: PointsRules
         label: string | null
+        is_active: boolean | null
+        created_at: string | null
       }[]
     | null
 }
@@ -129,7 +136,9 @@ export default async function MyPicksPage() {
         race_id,
         stage_id,
         type,
-        label
+        label,
+        is_active,
+        created_at
       )
     `)
     .eq('user_id', user.id)
@@ -149,10 +158,10 @@ export default async function MyPicksPage() {
     .from('results')
     .select('race_id, stage_id, rider_id, position')
 
-  const entries = entriesRaw ?? []
-const races = racesRaw ?? []
-const stages = stagesRaw ?? []
-const results = resultsRaw ?? []
+  const entries = (entriesRaw ?? []) as EntryRow[]
+  const races = (racesRaw ?? []) as RaceRow[]
+  const stages = (stagesRaw ?? []) as StageRow[]
+  const results = (resultsRaw ?? []) as ResultRow[]
 
   const raceMap = new Map<string, RaceRow>()
   const stageMap = new Map<string, StageRow>()
@@ -166,8 +175,11 @@ const results = resultsRaw ?? []
     resultMap.set(key, r.position)
   }
 
-  // raceId -> stageId/gc -> picks[]
-  const byRace = new Map<string, Map<string, PickDisplay[]>>()
+  // 1) Déterminer la question "à garder" pour chaque race+stage
+  // priorité :
+  // - question active
+  // - puis la plus récente
+  const latestQuestionIdByRaceStage = new Map<string, string>()
 
   for (const e of entries) {
     const q = Array.isArray(e.prediction_questions)
@@ -178,10 +190,74 @@ const results = resultsRaw ?? []
 
     const raceId = q.race_id
     const stageId = q.stage_id ?? 'gc'
-    const isStage = stageId !== 'gc'
+    const groupKey = `${raceId}:${stageId}`
 
-    const actual =
-      resultMap.get(`${raceId}:${stageId}:${e.rider_id}`) ?? null
+    const prevQuestionId = latestQuestionIdByRaceStage.get(groupKey)
+
+    if (!prevQuestionId) {
+      latestQuestionIdByRaceStage.set(groupKey, q.id)
+      continue
+    }
+
+    // retrouver la question précédente à comparer
+    const prevEntry = entries.find((x) => {
+      const px = Array.isArray(x.prediction_questions)
+        ? x.prediction_questions[0]
+        : x.prediction_questions
+      return px?.id === prevQuestionId
+    })
+
+    const prevQ = prevEntry
+      ? Array.isArray(prevEntry.prediction_questions)
+        ? prevEntry.prediction_questions[0]
+        : prevEntry.prediction_questions
+      : null
+
+    if (!prevQ) {
+      latestQuestionIdByRaceStage.set(groupKey, q.id)
+      continue
+    }
+
+    const prevActive = !!prevQ.is_active
+    const curActive = !!q.is_active
+
+    if (curActive && !prevActive) {
+      latestQuestionIdByRaceStage.set(groupKey, q.id)
+      continue
+    }
+
+    if (curActive === prevActive) {
+      const prevDate = new Date(prevQ.created_at ?? 0).getTime()
+      const curDate = new Date(q.created_at ?? 0).getTime()
+
+      if (curDate >= prevDate) {
+        latestQuestionIdByRaceStage.set(groupKey, q.id)
+      }
+    }
+  }
+
+  // 2) Grouper seulement les entries de la bonne question
+  const byRace = new Map<string, Map<string, PickDisplay[]>>()
+
+  for (const e of entries) {
+    const q = Array.isArray(e.prediction_questions)
+      ? e.prediction_questions[0]
+      : e.prediction_questions
+
+    const rider = Array.isArray(e.riders) ? e.riders[0] : e.riders
+
+    if (!q) continue
+
+    const raceId = q.race_id
+    const stageId = q.stage_id ?? 'gc'
+    const groupKey = `${raceId}:${stageId}`
+    const latestQuestionId = latestQuestionIdByRaceStage.get(groupKey)
+
+    // on ignore les anciennes questions
+    if (latestQuestionId !== q.id) continue
+
+    const isStage = stageId !== 'gc'
+    const actual = resultMap.get(`${raceId}:${stageId}:${e.rider_id}`) ?? null
 
     const points = computePoints(
       q.type,
@@ -190,21 +266,18 @@ const results = resultsRaw ?? []
       isStage
     )
 
-    const rider = Array.isArray(e.riders) ? e.riders[0] : e.riders
-
-const pick: PickDisplay = {
-  questionId: e.question_id,
-  riderId: e.rider_id,
-  riderName: rider?.name ?? '—',
-  team: rider?.team ?? '',
-  predicted: e.position,
-  actual,
-  points,
-  type: q.type,
-  label: q.label ?? '',
-  isStage,
-}
-
+    const pick: PickDisplay = {
+      questionId: e.question_id,
+      riderId: e.rider_id,
+      riderName: rider?.name ?? '—',
+      team: rider?.team ?? '',
+      predicted: e.position,
+      actual,
+      points,
+      type: q.type,
+      label: q.label ?? '',
+      isStage,
+    }
 
     if (!byRace.has(raceId)) {
       byRace.set(raceId, new Map<string, PickDisplay[]>())
@@ -240,7 +313,7 @@ const pick: PickDisplay = {
           {sortedRaceEntries.map(([raceId, stagesMap]) => {
             const race = raceMap.get(raceId)
 
-            // on trie : GC d’abord, puis étapes par numéro
+            // GC d’abord, puis étapes
             const sortedStageEntries = Array.from(stagesMap.entries()).sort(([aId], [bId]) => {
               if (aId === 'gc') return -1
               if (bId === 'gc') return 1

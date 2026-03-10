@@ -31,7 +31,6 @@ function pointsForPick(opts: {
 
   let pts = Math.max(1, basePoints - gap)
 
-  // Les étapes valent 50% des points
   if (isStage) {
     pts = Math.floor(pts / 2)
   }
@@ -39,9 +38,10 @@ function pointsForPick(opts: {
   return pts
 }
 
+type RaceStatus = 'open' | 'in_progress' | 'finished'
+
 export default async function RankingPage() {
   const supabase = await createSupabaseServerClient()
-
   const now = new Date()
 
   const { data: races } = await supabase
@@ -77,43 +77,45 @@ export default async function RankingPage() {
     .from('results')
     .select('race_id, stage_id, rider_id, position')
 
-  // -------- Question principale par course (GC / course)
   const mainQuestionByRace = new Map<string, any>()
+  const stageQuestionsByRace = new Map<string, any[]>()
 
   for (const q of questions ?? []) {
     const qq = q as any
-    if (qq.stage_id) continue
 
-    const prev = mainQuestionByRace.get(qq.race_id)
-    if (!prev) {
-      mainQuestionByRace.set(qq.race_id, qq)
+    if (qq.stage_id === null) {
+      const prev = mainQuestionByRace.get(qq.race_id)
+      if (!prev) {
+        mainQuestionByRace.set(qq.race_id, qq)
+      } else {
+        const prevDate = new Date(prev.created_at ?? 0).getTime()
+        const curDate = new Date(qq.created_at ?? 0).getTime()
+        if (curDate >= prevDate) mainQuestionByRace.set(qq.race_id, qq)
+      }
     } else {
-      const prevDate = new Date(prev.created_at ?? 0).getTime()
-      const curDate = new Date(qq.created_at ?? 0).getTime()
-      if (curDate >= prevDate) mainQuestionByRace.set(qq.race_id, qq)
+      if (!stageQuestionsByRace.has(qq.race_id)) stageQuestionsByRace.set(qq.race_id, [])
+      stageQuestionsByRace.get(qq.race_id)!.push(qq)
     }
   }
 
-  // -------- Map des résultats par race/stage/rider
   const resultPosByKey = new Map<string, number>()
   const hasGcResultsByRace = new Set<string>()
+  const hasStageResultsByRace = new Set<string>()
 
   for (const r of results ?? []) {
     const rr = r as any
     const key = `${rr.race_id}:${rr.stage_id ?? 'gc'}:${rr.rider_id}`
     resultPosByKey.set(key, rr.position)
 
-    if (!rr.stage_id && rr.race_id) {
-      hasGcResultsByRace.add(rr.race_id)
-    }
+    if (!rr.stage_id && rr.race_id) hasGcResultsByRace.add(rr.race_id)
+    if (rr.stage_id && rr.race_id) hasStageResultsByRace.add(rr.race_id)
   }
 
-  // -------- Score global = GC/course + étapes /2
   const qById = new Map<string, any>()
   for (const q of questions ?? []) qById.set((q as any).id, q as any)
 
   const pointsByUser = new Map<string, number>()
-  const pointsByRaceByUser = new Map<string, number>() // raceId:userId
+  const pointsByRaceByUser = new Map<string, number>()
 
   for (const e of entries ?? []) {
     const ee = e as any
@@ -145,34 +147,62 @@ export default async function RankingPage() {
     }))
     .sort((a, b) => b.points - a.points)
 
-  // -------- Status des courses
-  type RaceStatus = 'open' | 'locked' | 'finished'
-
-  function getRaceStatus(raceId: string): RaceStatus {
-    const q = mainQuestionByRace.get(raceId)
-
+  function isQuestionLocked(q: any) {
     const lockedByTime = q?.lock_at ? new Date(q.lock_at) <= now : false
-    const lockedManually = !!q?.locked
-    const locked = lockedByTime || lockedManually
+    return !!q?.locked || lockedByTime
+  }
 
-    const finished = hasGcResultsByRace.has(raceId)
+  function getRaceStatusInfo(raceId: string) {
+    const race = raceById.get(raceId)
+    const mainQ = mainQuestionByRace.get(raceId)
+    const stageQs = stageQuestionsByRace.get(raceId) ?? []
 
-    if (finished) return 'finished'
-    if (locked) return 'locked'
-    return 'open'
+    const hasGcResults = hasGcResultsByRace.has(raceId)
+    const hasStageResults = hasStageResultsByRace.has(raceId)
+
+    const mainLocked = mainQ ? isQuestionLocked(mainQ) : false
+    const hasOpenStageQuestions = stageQs.some((q) => !isQuestionLocked(q))
+
+    let status: RaceStatus = 'open'
+    let detail = 'Pronostics ouverts'
+
+    if (hasGcResults) {
+      status = 'finished'
+      detail = 'Classement général importé'
+    } else if (hasStageResults || mainLocked) {
+      status = 'in_progress'
+
+      if (race?.pcs_is_stage_race) {
+        if (hasOpenStageQuestions) {
+          detail = 'Général verrouillé • étapes ouvertes'
+        } else {
+          detail = 'Général verrouillé • course en cours'
+        }
+      } else {
+        detail = 'Course en cours'
+      }
+    }
+
+    return { status, detail }
   }
 
   const openRaces: any[] = []
-  const lockedRaces: any[] = []
+  const inProgressRaces: any[] = []
   const finishedRaces: any[] = []
 
   for (const race of races ?? []) {
     const rr = race as any
-    const status = getRaceStatus(rr.id)
+    const info = getRaceStatusInfo(rr.id)
 
-    if (status === 'open') openRaces.push(rr)
-    else if (status === 'locked') lockedRaces.push(rr)
-    else finishedRaces.push(rr)
+    const item = {
+      ...rr,
+      status: info.status,
+      statusLabel: info.detail,
+    }
+
+    if (info.status === 'open') openRaces.push(item)
+    else if (info.status === 'in_progress') inProgressRaces.push(item)
+    else finishedRaces.push(item)
   }
 
   function RaceSection(props: {
@@ -191,6 +221,7 @@ export default async function RankingPage() {
         <div className="space-y-3">
           {races.map((race) => {
             const q = mainQuestionByRace.get(race.id)
+
             return (
               <details key={race.id} className="border rounded-lg p-3">
                 <summary className="cursor-pointer font-semibold flex items-center justify-between gap-4">
@@ -203,6 +234,8 @@ export default async function RankingPage() {
 
                   <span className="text-xs opacity-70">{badge}</span>
                 </summary>
+
+                <div className="mt-2 text-sm opacity-70">{race.statusLabel}</div>
 
                 <div className="mt-3 space-y-1 text-sm">
                   {leaderboard.map((u) => {
@@ -250,7 +283,7 @@ export default async function RankingPage() {
       )}
 
       <RaceSection title="🟢 Courses ouvertes" races={openRaces} badge="OPEN" />
-      <RaceSection title="🔒 Courses verrouillées / en cours" races={lockedRaces} badge="LOCKED" />
+      <RaceSection title="🟡 Courses en cours" races={inProgressRaces} badge="IN PROGRESS" />
       <RaceSection title="🏁 Courses terminées" races={finishedRaces} badge="FINISHED" />
     </main>
   )
