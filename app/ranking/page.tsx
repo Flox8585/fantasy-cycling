@@ -5,6 +5,7 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 type PointsRules = 'final_top3' | 'stage_top3' | 'final_top5' | 'gc_top5' | 'gc_top10'
+type RaceStatus = 'open' | 'in_progress' | 'finished'
 
 function topSizeFromQuestionType(questionType: PointsRules) {
   if (questionType === 'final_top3' || questionType === 'stage_top3') return 3
@@ -13,13 +14,37 @@ function topSizeFromQuestionType(questionType: PointsRules) {
   return 0
 }
 
+function normalizeRaceName(name: string | null | undefined) {
+  return String(name ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function isMonumentRaceName(name: string | null | undefined) {
+  const n = normalizeRaceName(name)
+
+  return (
+    n.includes('milano-sanremo') ||
+    n.includes('milan-sanremo') ||
+    n.includes('ronde van vlaanderen') ||
+    n.includes('tour of flanders') ||
+    n.includes('paris-roubaix') ||
+    n.includes('liege-bastogne-liege') ||
+    n.includes('liège-bastogne-liège') ||
+    n.includes('il lombardia') ||
+    n.includes('giro di lombardia') ||
+    n.includes('lombardy')
+  )
+}
+
 function pointsForPick(opts: {
   questionType: PointsRules
   actualPos: number | null
   predictedPos: number
-  isStage: boolean
+  raceName: string | null
 }) {
-  const { questionType, actualPos, predictedPos, isStage } = opts
+  const { questionType, actualPos, predictedPos, raceName } = opts
   if (!actualPos) return 0
 
   const topSize = topSizeFromQuestionType(questionType)
@@ -31,14 +56,15 @@ function pointsForPick(opts: {
 
   let pts = Math.max(1, basePoints - gap)
 
-  if (isStage) {
-    pts = Math.floor(pts / 2)
+  const isGc = questionType === 'gc_top5' || questionType === 'gc_top10'
+  const isMonument = isMonumentRaceName(raceName)
+
+  if (isGc || isMonument) {
+    pts = pts * 2
   }
 
   return pts
 }
-
-type RaceStatus = 'open' | 'in_progress' | 'finished'
 
 export default async function RankingPage() {
   const supabase = await createSupabaseServerClient()
@@ -124,13 +150,14 @@ export default async function RankingPage() {
 
     const raceId = q.race_id as string
     const stageId = q.stage_id ?? 'gc'
+    const race = raceById.get(raceId)
     const actualPos = resultPosByKey.get(`${raceId}:${stageId}:${ee.rider_id}`) ?? null
 
     const pts = pointsForPick({
       questionType: q.type as PointsRules,
       actualPos,
       predictedPos: ee.position,
-      isStage: !!q.stage_id,
+      raceName: race?.name ?? null,
     })
 
     pointsByUser.set(ee.user_id, (pointsByUser.get(ee.user_id) ?? 0) + pts)
@@ -230,6 +257,9 @@ export default async function RankingPage() {
                       {race.name} {race.pcs_year ? `(${race.pcs_year})` : ''}
                     </Link>
                     {q ? <span className="opacity-70 text-sm"> — {q.type}</span> : null}
+                    {isMonumentRaceName(race.name) ? (
+                      <span className="ml-2 text-xs opacity-70">Monument x2</span>
+                    ) : null}
                   </span>
 
                   <span className="text-xs opacity-70">{badge}</span>

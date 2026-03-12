@@ -13,13 +13,37 @@ function topSizeFromQuestionType(questionType: PointsRules) {
   return 0
 }
 
+function normalizeRaceName(name: string | null | undefined) {
+  return String(name ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function isMonumentRaceName(name: string | null | undefined) {
+  const n = normalizeRaceName(name)
+
+  return (
+    n.includes('milano-sanremo') ||
+    n.includes('milan-sanremo') ||
+    n.includes('ronde van vlaanderen') ||
+    n.includes('tour of flanders') ||
+    n.includes('paris-roubaix') ||
+    n.includes('liege-bastogne-liege') ||
+    n.includes('liège-bastogne-liège') ||
+    n.includes('il lombardia') ||
+    n.includes('giro di lombardia') ||
+    n.includes('lombardy')
+  )
+}
+
 function pointsForPick(opts: {
   questionType: PointsRules
   actualPos: number | null
   predictedPos: number
-  isStage: boolean
+  raceName: string | null
 }) {
-  const { questionType, actualPos, predictedPos, isStage } = opts
+  const { questionType, actualPos, predictedPos, raceName } = opts
   if (!actualPos) return 0
 
   const topSize = topSizeFromQuestionType(questionType)
@@ -31,8 +55,11 @@ function pointsForPick(opts: {
 
   let pts = Math.max(1, basePoints - gap)
 
-  if (isStage) {
-    pts = Math.floor(pts / 2)
+  const isGc = questionType === 'gc_top5' || questionType === 'gc_top10'
+  const isMonument = isMonumentRaceName(raceName)
+
+  if (isGc || isMonument) {
+    pts = pts * 2
   }
 
   return pts
@@ -52,9 +79,9 @@ function buildSectionData(opts: {
   results: any[]
   entries: any[]
   usernameByUser: Map<string, string>
-  isStage: boolean
+  raceName: string | null
 }) {
-  const { question, results, entries, usernameByUser, isStage } = opts
+  const { question, results, entries, usernameByUser, raceName } = opts
 
   const actualPosByRider = new Map<string, number>()
   for (const r of results ?? []) {
@@ -74,7 +101,7 @@ function buildSectionData(opts: {
       questionType: question.type as PointsRules,
       actualPos,
       predictedPos: ee.position,
-      isStage,
+      raceName,
     })
 
     const row: PickRow = {
@@ -281,13 +308,20 @@ export default async function RaceRankingPage(props: any) {
     ? (allEntries ?? []).filter((e: any) => e.question_id === mainQuestion.id)
     : []
 
+  const gcSubtitle =
+    mainQuestion?.type === 'gc_top5' || mainQuestion?.type === 'gc_top10'
+      ? 'Le classement général compte x2.'
+      : isMonumentRaceName(race?.name)
+        ? 'Monument : les points comptent x2.'
+        : 'Barème normal.'
+
   const gcData = mainQuestion
     ? buildSectionData({
         question: mainQuestion,
         results: gcResults,
         entries: gcEntries,
         usernameByUser,
-        isStage: false,
+        raceName: race?.name ?? null,
       })
     : { users: [], hasResults: false }
 
@@ -304,7 +338,7 @@ export default async function RaceRankingPage(props: any) {
           results: stageResults,
           entries: stageEntries,
           usernameByUser,
-          isStage: true,
+          raceName: race?.name ?? null,
         })
       : { users: [], hasResults: false }
 
@@ -350,7 +384,7 @@ export default async function RaceRankingPage(props: any) {
       {mainQuestion ? (
         <RankingSection
           title="Classement général / course"
-          subtitle="Le GC et les courses d’un jour comptent à 100 %."
+          subtitle={gcSubtitle}
           results={gcResults}
           users={gcData.users}
           emptyResultsText="Aucun résultat GC / course importé pour l’instant."
@@ -365,7 +399,7 @@ export default async function RaceRankingPage(props: any) {
         <div className="mt-12">
           <h2 className="text-2xl font-bold">Étapes</h2>
           <p className="text-sm opacity-70 mt-1">
-            Les étapes comptent dans le classement global à 50 % des points normaux.
+            Les étapes comptent maintenant au barème normal.
           </p>
 
           <div className="mt-4 space-y-8">
@@ -389,6 +423,7 @@ export default async function RaceRankingPage(props: any) {
                 {stageQuestion ? (
                   <RankingSection
                     title="Classement étape"
+                    subtitle="Barème normal."
                     results={stageResults}
                     users={stageData.users}
                     emptyResultsText="Aucun résultat importé pour cette étape."

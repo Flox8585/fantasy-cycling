@@ -30,12 +30,7 @@ function pointsForPick(opts: {
   const basePoints = topSize - actualPos + 1
   const gap = Math.abs(predictedPos - actualPos)
 
-  let pts = Math.max(1, basePoints - gap)
-
-  // Une étape vaut 50% des points
-  pts = Math.floor(pts / 2)
-
-  return pts
+  return Math.max(1, basePoints - gap)
 }
 
 function stageTypeLabel(stageType: string | null | undefined) {
@@ -393,7 +388,7 @@ export default async function StagePage(props: any) {
       <div className="mt-10">
         <h2 className="text-xl font-semibold">Pronostics des joueurs</h2>
         <p className="text-sm opacity-70 mt-1">
-          Les étapes comptent à 50 % des points normaux dans le classement global.
+          Les étapes comptent maintenant au barème normal.
         </p>
 
         <div className="mt-4 space-y-3">
@@ -443,3 +438,4 @@ export default async function StagePage(props: any) {
     </main>
   )
 }
+
