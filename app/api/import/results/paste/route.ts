@@ -12,10 +12,27 @@ function normalizeUrl(input: string) {
   url = url.replace('https://procyclingstats.com', 'https://www.procyclingstats.com')
   url = url.replace('http://www.procyclingstats.com', 'https://www.procyclingstats.com')
 
-  // on retire les suffixes les plus fréquents
-  url = url.replace(/\/(result|results|startlist|stages|overview|gc)(\/)?$/i, '')
+  // on retire seulement /result éventuel
+  // IMPORTANT : on garde /gc et /stage-x
+  url = url.replace(/\/result\/?$/i, '')
 
   return url
+}
+
+function parseRaceBaseUrl(url: string) {
+  const normalized = normalizeUrl(url)
+  const m = normalized.match(/(https:\/\/www\.procyclingstats\.com\/race\/[^/]+\/\d{4})/i)
+  return m?.[1] ?? null
+}
+
+function parseStageNumber(url: string): number | null {
+  const m = url.match(/\/stage-(\d+)(\/|$)/i)
+  if (!m) return null
+  return Number(m[1])
+}
+
+function isGcUrl(url: string) {
+  return /\/gc\/?$/i.test(url)
 }
 
 function nameFromPcsUrl(pcsUrl: string) {
@@ -28,18 +45,6 @@ function nameFromPcsUrl(pcsUrl: string) {
     .join(' ')
 }
 
-function parseStageNumberFromUrl(url: string): number | null {
-  const m = url.match(/\/stage-(\d+)(\/|$)/i)
-  if (!m) return null
-  return Number(m[1])
-}
-
-function parseRaceBaseUrl(url: string) {
-  const normalized = normalizeUrl(url)
-  const m = normalized.match(/(https:\/\/www\.procyclingstats\.com\/race\/[^/]+\/\d{4})/i)
-  return m?.[1] ?? null
-}
-
 function extractRowsFromBody(body: any): Array<{ position: number; pcs_url: string }> {
   if (Array.isArray(body)) return body
   if (Array.isArray(body?.rows)) return body.rows
@@ -50,6 +55,7 @@ function extractRowsFromBody(body: any): Array<{ position: number; pcs_url: stri
 
 export async function POST(req: Request) {
   try {
+    // ---- Auth
     const supabase = await createSupabaseServerClient()
     const {
       data: { user },
@@ -68,6 +74,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Not allowed' }, { status: 403 })
     }
 
+    // ---- Body
     const body = await req.json().catch(() => null)
 
     if (!body) {
@@ -86,14 +93,21 @@ export async function POST(req: Request) {
     }
 
     const pcsUrl = normalizeUrl(pcsUrlRaw)
-    const stageNumber = parseStageNumberFromUrl(pcsUrl)
     const raceBaseUrl = parseRaceBaseUrl(pcsUrl)
+    const stageNumber = parseStageNumber(pcsUrl)
+    const gcMode = isGcUrl(pcsUrl)
 
     if (!raceBaseUrl) {
-      return NextResponse.json({ error: 'Impossible de reconnaître la course depuis l’URL PCS.' }, { status: 400 })
+      return NextResponse.json(
+        {
+          error: 'Impossible de reconnaître la course depuis l’URL PCS.',
+          pcsUrl,
+        },
+        { status: 400 }
+      )
     }
 
-    // 1) retrouver la course
+    // ---- Find race
     const { data: raceRow, error: raceErr } = await supabaseAdmin
       .from('races')
       .select('id, name, pcs_url')
@@ -116,13 +130,16 @@ export async function POST(req: Request) {
 
     const raceId = raceRow.id as string
 
-    // 2) si étape, retrouver l’étape
+    // ---- Detect target type
     let stageId: string | null = null
+    let mode: 'gc' | 'stage' | 'one-day' = 'one-day'
 
     if (stageNumber) {
+      mode = 'stage'
+
       const { data: stageRow, error: stageErr } = await supabaseAdmin
         .from('stages')
-        .select('id, stage_number, pcs_url')
+        .select('id, stage_number, name')
         .eq('race_id', raceId)
         .eq('stage_number', stageNumber)
         .maybeSingle()
@@ -142,10 +159,16 @@ export async function POST(req: Request) {
       }
 
       stageId = stageRow.id
+    } else if (gcMode) {
+      mode = 'gc'
+      stageId = null
+    } else {
+      mode = 'one-day'
+      stageId = null
     }
 
-    // 3) nettoyer les anciennes lignes de résultats
-    if (stageId) {
+    // ---- Clear previous results for this exact target
+    if (mode === 'stage' && stageId) {
       const { error: deleteErr } = await supabaseAdmin
         .from('results')
         .delete()
@@ -156,6 +179,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: deleteErr.message }, { status: 500 })
       }
     } else {
+      // GC / one-day => stage_id null
       const { error: deleteErr } = await supabaseAdmin
         .from('results')
         .delete()
@@ -167,43 +191,45 @@ export async function POST(req: Request) {
       }
     }
 
-    // 4) on prend UNIQUEMENT les 20 premières lignes du JSON
+    // ---- Clean rows
     const rows = rowsRaw
       .filter((r) => r && Number.isFinite(Number(r.position)) && String(r.pcs_url || '').trim())
-      .sort((a, b) => Number(a.position) - Number(b.position))
+      .map((r) => ({
+        position: Number(r.position),
+        pcs_url: normalizeUrl(String(r.pcs_url)),
+      }))
+      .sort((a, b) => a.position - b.position)
       .slice(0, TOP_LIMIT)
 
     let inserted = 0
-    const createdRiders: string[] = []
     let firstError: string | null = null
+    const createdRiders: string[] = []
 
     for (const row of rows) {
-      const pos = Number(row.position)
-      const pcsRiderUrl = normalizeUrl(String(row.pcs_url || '').trim())
+      const pos = row.position
+      const pcsRiderUrl = row.pcs_url
 
       if (!pcsRiderUrl.includes('/rider/')) {
-        if (!firstError) firstError = `Invalid rider url: ${pcsRiderUrl}`
+        if (!firstError) firstError = `Invalid rider URL: ${pcsRiderUrl}`
         continue
       }
 
       let riderId: string | null = null
 
-      // cherche le rider
-      const { data: existingRider, error: existingErr } = await supabaseAdmin
+      const { data: existingRider, error: riderErr } = await supabaseAdmin
         .from('riders')
         .select('id')
         .eq('pcs_url', pcsRiderUrl)
         .maybeSingle()
 
-      if (existingErr) {
-        if (!firstError) firstError = existingErr.message
+      if (riderErr) {
+        if (!firstError) firstError = riderErr.message
         continue
       }
 
       if (existingRider?.id) {
         riderId = existingRider.id
       } else {
-        // le créer automatiquement si absent
         const generatedName = nameFromPcsUrl(pcsRiderUrl)
 
         const { data: insertedRider, error: insertRiderErr } = await supabaseAdmin
@@ -217,7 +243,9 @@ export async function POST(req: Request) {
           .single()
 
         if (insertRiderErr || !insertedRider?.id) {
-          if (!firstError) firstError = insertRiderErr?.message ?? `Impossible de créer rider ${pcsRiderUrl}`
+          if (!firstError) {
+            firstError = insertRiderErr?.message ?? `Impossible de créer rider ${pcsRiderUrl}`
+          }
           continue
         }
 
@@ -225,7 +253,6 @@ export async function POST(req: Request) {
         createdRiders.push(pcsRiderUrl)
       }
 
-      // insérer le résultat
       const { error: insertResultErr } = await supabaseAdmin
         .from('results')
         .insert({
@@ -245,15 +272,22 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      raceId,
+      race: {
+        id: raceId,
+        name: raceRow.name,
+        pcs_url: raceBaseUrl,
+      },
+      mode,
       stageId,
       imported: inserted,
       topLimit: TOP_LIMIT,
       createdRidersCount: createdRiders.length,
       createdRiders,
       debug: {
+        pcsUrl,
         raceBaseUrl,
         stageNumber,
+        gcMode,
         rowsReceived: rowsRaw.length,
         rowsProcessed: rows.length,
         firstError,
