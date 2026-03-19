@@ -1,6 +1,7 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
 
 function normalizeDisplayUrl(input: string) {
   let url = String(input || '').trim()
@@ -10,22 +11,40 @@ function normalizeDisplayUrl(input: string) {
   url = url.replace('https://procyclingstats.com', 'https://www.procyclingstats.com')
   url = url.replace('http://www.procyclingstats.com', 'https://www.procyclingstats.com')
 
-  // IMPORTANT :
-  // on ne retire PAS /gc
-  // on ne retire PAS /stage-x
-  // on retire seulement /result en fin
+  // on retire seulement /result
+  // IMPORTANT: on garde /gc et /stage-x
   url = url.replace(/\/result\/?$/i, '')
 
   return url
 }
 
 export default function AdminImportPage() {
+  const searchParams = useSearchParams()
+
   const [url, setUrl] = useState('')
   const [jsonText, setJsonText] = useState('')
   const [responseText, setResponseText] = useState('')
   const [loadingCourse, setLoadingCourse] = useState(false)
   const [loadingResult, setLoadingResult] = useState(false)
   const [loadingJson, setLoadingJson] = useState(false)
+
+  useEffect(() => {
+    const pcsParam = searchParams.get('pcs') ?? ''
+    const jsonParam = searchParams.get('json') ?? ''
+
+    if (pcsParam) {
+      setUrl(pcsParam)
+    }
+
+    if (jsonParam) {
+      try {
+        const decoded = decodeURIComponent(jsonParam)
+        setJsonText(decoded)
+      } catch {
+        setJsonText(jsonParam)
+      }
+    }
+  }, [searchParams])
 
   const normalizedUrl = useMemo(() => normalizeDisplayUrl(url), [url])
 
@@ -130,7 +149,7 @@ export default function AdminImportPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          pcsUrl: normalizedUrl, // ← très important : on envoie la vraie URL brute normalisée
+          pcsUrl: normalizedUrl,
           results: parsed,
         }),
       })
