@@ -1,32 +1,15 @@
 import { NextResponse } from 'next/server'
-import * as cheerio from 'cheerio'
 import { chromium } from 'playwright'
 import { supabaseAdmin } from '../../../../lib/supabase-admin'
 import { createSupabaseServerClient } from '../../../../lib/supabase-server'
 
-function normalizeSpace(s: string) {
-  return s.replace(/\s+/g, ' ').trim()
-}
-
-function absPcsUrl(hrefRaw: string) {
-  const href = String(hrefRaw || '').trim()
-  if (!href) return null
-  if (href.startsWith('http')) return href
-  if (href.startsWith('//')) return `https:${href}`
-  if (href.startsWith('/')) return `https://www.procyclingstats.com${href}`
-  return `https://www.procyclingstats.com/${href.replace(/^\/+/, '')}`
-}
-
-function normalizeInputUrl(input: string) {
+function normalizeUrl(input: string) {
   let url = String(input || '').trim()
   if (!url) return ''
 
   url = url.replace('http://', 'https://')
   url = url.replace('https://procyclingstats.com', 'https://www.procyclingstats.com')
   url = url.replace('http://www.procyclingstats.com', 'https://www.procyclingstats.com')
-
-  // on retire seulement /result éventuel
-  // IMPORTANT: on garde /gc et /stage-x
   url = url.replace(/\/result\/?$/i, '')
 
   return url
@@ -46,74 +29,14 @@ function isGcUrl(url: string) {
   return /\/gc\/?$/i.test(url)
 }
 
-async function fetchHtml(url: string) {
-  const browser = await chromium.launch({ headless: true })
+function nameFromPcsUrl(pcsUrl: string) {
+  const slug = pcsUrl.split('/rider/')[1]?.split('?')[0]?.trim() ?? ''
+  if (!slug) return 'Unknown rider'
 
-  try {
-    const page = await browser.newPage()
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
-    await page.waitForTimeout(2500)
-
-    try {
-      await page.waitForLoadState('networkidle', { timeout: 15000 })
-    } catch {}
-
-    await page.waitForTimeout(800)
-
-    const html = await page.content()
-    const title = await page.title().catch(() => '')
-    const finalUrl = page.url()
-
-    const looksBlocked =
-      html.includes('Just a moment') ||
-      html.toLowerCase().includes('cloudflare') ||
-      html.toLowerCase().includes('access denied') ||
-      html.toLowerCase().includes('forbidden')
-
-    return {
-      html,
-      title,
-      finalUrl,
-      looksBlocked,
-    }
-  } finally {
-    await browser.close().catch(() => {})
-  }
-}
-
-function findBestResultsTable($: cheerio.CheerioAPI) {
-  const candidates: { el: any; riderCount: number }[] = []
-
-  const scopes = [
-    $('main').first(),
-    $('div.content').first(),
-    $('div.container').first(),
-    $('body').first(),
-  ].filter((x) => x && x.length > 0)
-
-  for (const scope of scopes) {
-    scope.find('table').each((_, table) => {
-      const links = $(table).find('a[href*="/rider/"]')
-      const unique = new Set<string>()
-
-      links.each((__, a) => {
-        const href = absPcsUrl($(a).attr('href') || '')
-        if (href && href.includes('/rider/')) unique.add(href)
-      })
-
-      const riderCount = unique.size
-      if (riderCount > 0) {
-        candidates.push({ el: table, riderCount })
-      }
-    })
-
-    if (candidates.length > 0) break
-  }
-
-  if (!candidates.length) return null
-
-  candidates.sort((a, b) => b.riderCount - a.riderCount)
-  return candidates[0].el
+  return slug
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
 }
 
 export async function POST(req: Request) {
@@ -143,7 +66,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing pcsUrl' }, { status: 400 })
     }
 
-    const inputUrl = normalizeInputUrl(pcsUrlRaw)
+    const inputUrl = normalizeUrl(pcsUrlRaw)
     const raceBaseUrl = parseRaceBaseUrl(inputUrl)
 
     if (!raceBaseUrl) {
@@ -156,14 +79,14 @@ export async function POST(req: Request) {
     const stageNumber = parseStageNumber(inputUrl)
     const gcMode = isGcUrl(inputUrl)
 
-    const { data: raceRow, error: raceLookupErr } = await supabaseAdmin
+    const { data: raceRow, error: raceErr } = await supabaseAdmin
       .from('races')
-      .select('id, pcs_url, name, pcs_is_stage_race')
+      .select('id, name, pcs_url')
       .eq('pcs_url', raceBaseUrl)
       .maybeSingle()
 
-    if (raceLookupErr) {
-      return NextResponse.json({ error: raceLookupErr.message }, { status: 500 })
+    if (raceErr) {
+      return NextResponse.json({ error: raceErr.message }, { status: 500 })
     }
 
     if (!raceRow?.id) {
@@ -176,10 +99,12 @@ export async function POST(req: Request) {
     const raceId = raceRow.id as string
 
     let targetUrl = ''
-    let targetStageId: string | null = null
-    let targetLabel = ''
+    let stageId: string | null = null
+    let mode: 'stage' | 'gc' | 'one-day' = 'one-day'
 
     if (stageNumber) {
+      mode = 'stage'
+
       const { data: stageRow, error: stageErr } = await supabaseAdmin
         .from('stages')
         .select('id, stage_number, name')
@@ -193,145 +118,218 @@ export async function POST(req: Request) {
 
       if (!stageRow?.id) {
         return NextResponse.json(
-          { error: `Étape ${stageNumber} introuvable en base pour cette course.` },
+          { error: `Étape ${stageNumber} introuvable pour cette course.` },
           { status: 400 }
         )
       }
 
-      targetStageId = stageRow.id
+      stageId = stageRow.id
       targetUrl = `${raceBaseUrl}/stage-${stageNumber}/result`
-      targetLabel = `stage-${stageNumber}`
     } else if (gcMode) {
-      targetStageId = null
+      mode = 'gc'
+      stageId = null
       targetUrl = `${raceBaseUrl}/gc`
-      targetLabel = 'gc'
     } else {
-      targetStageId = null
+      mode = 'one-day'
+      stageId = null
       targetUrl = `${raceBaseUrl}/result`
-      targetLabel = 'result'
     }
 
-    const resp = await fetchHtml(targetUrl)
+    const browser = await chromium.launch({ headless: true })
 
-    if (resp.looksBlocked) {
-      return NextResponse.json(
-        {
-          error: 'PCS blocked (result page).',
-          title: resp.title,
-          finalUrl: resp.finalUrl,
-        },
-        { status: 500 }
-      )
-    }
+    try {
+      const page = await browser.newPage()
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      await page.waitForTimeout(2500)
 
-    const $ = cheerio.load(resp.html)
-    const bestTable = findBestResultsTable($)
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 15000 })
+      } catch {}
 
-    let links: cheerio.Cheerio<any>
-    if (bestTable) {
-      links = $(bestTable).find('a[href*="/rider/"]')
-    } else {
-      links = $('a[href*="/rider/"]')
-    }
+      await page.waitForTimeout(1000)
 
-    if (targetStageId) {
-      await supabaseAdmin
-        .from('results')
-        .delete()
-        .eq('race_id', raceId)
-        .eq('stage_id', targetStageId)
-    } else {
-      await supabaseAdmin
-        .from('results')
-        .delete()
-        .eq('race_id', raceId)
-        .is('stage_id', null)
-    }
+      const title = await page.title().catch(() => '')
+      const finalUrl = page.url()
+      const html = await page.content()
 
-    let imported = 0
-    const seen = new Set<string>()
-    let firstMissingRider: string | null = null
+      const looksBlocked =
+        html.includes('Just a moment') ||
+        html.toLowerCase().includes('cloudflare') ||
+        html.toLowerCase().includes('access denied') ||
+        html.toLowerCase().includes('forbidden')
 
-    for (let i = 0; i < links.length && imported < 50; i++) {
-      const a = links.eq(i)
-      const pcsRiderUrl = absPcsUrl(String(a.attr('href') || ''))
-      if (!pcsRiderUrl) continue
-      if (!pcsRiderUrl.includes('/rider/')) continue
-      if (seen.has(pcsRiderUrl)) continue
-      seen.add(pcsRiderUrl)
-
-      const tr = a.closest('tr')
-      let pos: number | null = null
-
-      const tds = tr.find('td,th')
-      for (let k = 0; k < tds.length; k++) {
-        const t = normalizeSpace($(tds.get(k)).text())
-        const m = t.match(/^(\d{1,3})$/)
-        if (m) {
-          pos = Number(m[1])
-          break
-        }
-      }
-
-      if (!pos) pos = imported + 1
-
-      const { data: rider } = await supabaseAdmin
-        .from('riders')
-        .select('id')
-        .eq('pcs_url', pcsRiderUrl)
-        .maybeSingle()
-
-      if (!rider?.id) {
-        if (!firstMissingRider) firstMissingRider = pcsRiderUrl
-        continue
-      }
-
-      const { error: insertErr } = await supabaseAdmin.from('results').insert({
-        race_id: raceId,
-        stage_id: targetStageId,
-        rider_id: rider.id,
-        position: pos,
-      })
-
-      if (insertErr) {
+      if (looksBlocked) {
         return NextResponse.json(
           {
-            error: insertErr.message,
-            targetLabel,
-            targetUrl,
-            raceId,
-            stageId: targetStageId,
-            firstMissingRider,
+            error: 'PCS blocked (result page).',
+            title,
+            finalUrl,
           },
           { status: 500 }
         )
       }
 
-      imported++
-    }
+      const extracted = await page.evaluate(() => {
+        function clean(s: string) {
+          return String(s || '').replace(/\s+/g, ' ').trim()
+        }
 
-    return NextResponse.json({
-      ok: true,
-      race: {
-        id: raceId,
-        name: raceRow.name,
-        pcs_url: raceBaseUrl,
-      },
-      target: {
-        mode: targetLabel,
-        url: targetUrl,
-        stageId: targetStageId,
-      },
-      imported,
-      debug: {
-        title: resp.title,
-        finalUrl: resp.finalUrl,
-        linksFound: links.length,
-        uniqueRiderLinks: seen.size,
-        firstMissingRider,
-        usedBestTable: !!bestTable,
-      },
-    })
+        function abs(href: string | null) {
+          if (!href) return null
+          if (href.startsWith('http')) return href
+          if (href.startsWith('//')) return `https:${href}`
+          if (href.startsWith('/')) return `https://www.procyclingstats.com${href}`
+          return `https://www.procyclingstats.com/${href.replace(/^\/+/, '')}`
+        }
+
+        const rows = Array.from(document.querySelectorAll('table tr'))
+        const out: { position: number; pcs_url: string; rider_name: string }[] = []
+        const seen = new Set<string>()
+
+        for (const row of rows) {
+          const cells = Array.from(row.querySelectorAll('td,th'))
+          if (!cells.length) continue
+
+          let pos: number | null = null
+          for (const cell of cells) {
+            const txt = clean((cell as HTMLElement).innerText)
+            if (/^\d{1,3}$/.test(txt)) {
+              const n = Number(txt)
+              if (n >= 1 && n <= 50) {
+                pos = n
+                break
+              }
+            }
+          }
+
+          if (!pos) continue
+
+          const riderLink = row.querySelector('a[href*="/rider/"]') as HTMLAnchorElement | null
+          if (!riderLink) continue
+
+          const pcs_url = abs(riderLink.getAttribute('href'))
+          const rider_name = clean(riderLink.innerText)
+
+          if (!pcs_url || !rider_name) continue
+          if (seen.has(pcs_url)) continue
+          seen.add(pcs_url)
+
+          out.push({ position: pos, pcs_url, rider_name })
+        }
+
+        out.sort((a, b) => a.position - b.position)
+        return out.slice(0, 50)
+      })
+
+      if (!extracted.length) {
+        return NextResponse.json(
+          {
+            error: 'Aucun coureur trouvé sur la page rendue PCS.',
+            title,
+            finalUrl,
+            targetUrl,
+          },
+          { status: 500 }
+        )
+      }
+
+      if (mode === 'stage' && stageId) {
+        const { error: deleteErr } = await supabaseAdmin
+          .from('results')
+          .delete()
+          .eq('race_id', raceId)
+          .eq('stage_id', stageId)
+
+        if (deleteErr) {
+          return NextResponse.json({ error: deleteErr.message }, { status: 500 })
+        }
+      } else {
+        const { error: deleteErr } = await supabaseAdmin
+          .from('results')
+          .delete()
+          .eq('race_id', raceId)
+          .is('stage_id', null)
+
+        if (deleteErr) {
+          return NextResponse.json({ error: deleteErr.message }, { status: 500 })
+        }
+      }
+
+      let inserted = 0
+      let firstError: string | null = null
+
+      for (const row of extracted) {
+        let riderId: string | null = null
+
+        const { data: existing } = await supabaseAdmin
+          .from('riders')
+          .select('id')
+          .eq('pcs_url', row.pcs_url)
+          .maybeSingle()
+
+        if (existing?.id) {
+          riderId = existing.id
+        } else {
+          const { data: created, error: createErr } = await supabaseAdmin
+            .from('riders')
+            .insert({
+              pcs_url: row.pcs_url,
+              name: row.rider_name || nameFromPcsUrl(row.pcs_url),
+              team: null,
+            })
+            .select('id')
+            .single()
+
+          if (createErr || !created?.id) {
+            if (!firstError) {
+              firstError = createErr?.message ?? `Impossible de créer rider ${row.rider_name}`
+            }
+            continue
+          }
+
+          riderId = created.id
+        }
+
+        const { error: insertErr } = await supabaseAdmin
+          .from('results')
+          .insert({
+            race_id: raceId,
+            stage_id: stageId,
+            rider_id: riderId,
+            position: row.position,
+          })
+
+        if (insertErr) {
+          if (!firstError) firstError = insertErr.message
+          continue
+        }
+
+        inserted++
+      }
+
+      return NextResponse.json({
+        ok: true,
+        race: {
+          id: raceId,
+          name: raceRow.name,
+          pcs_url: raceBaseUrl,
+        },
+        target: {
+          mode,
+          url: targetUrl,
+          stageId,
+        },
+        imported: inserted,
+        debug: {
+          title,
+          finalUrl,
+          extracted: extracted.length,
+          firstError,
+        },
+      })
+    } finally {
+      await browser.close().catch(() => {})
+    }
   } catch (e: any) {
     return NextResponse.json(
       { error: e?.message ?? 'Unknown error' },
