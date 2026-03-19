@@ -25,7 +25,8 @@ function normalizeInputUrl(input: string) {
   url = url.replace('https://procyclingstats.com', 'https://www.procyclingstats.com')
   url = url.replace('http://www.procyclingstats.com', 'https://www.procyclingstats.com')
 
-  // on retire juste /result éventuel en fin
+  // on retire seulement /result final éventuel
+  // IMPORTANT: on garde /gc et /stage-x
   url = url.replace(/\/result\/?$/i, '')
 
   return url
@@ -77,6 +78,42 @@ async function fetchHtml(url: string) {
   } finally {
     await browser.close().catch(() => {})
   }
+}
+
+function findBestResultsTable($: cheerio.CheerioAPI) {
+  const candidates: { el: cheerio.Element; riderCount: number }[] = []
+
+  // on privilégie les zones centrales
+  const scopes = [
+    $('main').first(),
+    $('div.content').first(),
+    $('div.container').first(),
+    $('body').first(),
+  ].filter((x) => x && x.length > 0)
+
+  for (const scope of scopes) {
+    scope.find('table').each((_, table) => {
+      const links = $(table).find('a[href*="/rider/"]')
+      const unique = new Set<string>()
+
+      links.each((__, a) => {
+        const href = absPcsUrl($(a).attr('href') || '')
+        if (href && href.includes('/rider/')) unique.add(href)
+      })
+
+      const riderCount = unique.size
+      if (riderCount > 0) {
+        candidates.push({ el: table, riderCount })
+      }
+    })
+
+    if (candidates.length > 0) break
+  }
+
+  if (!candidates.length) return null
+
+  candidates.sort((a, b) => b.riderCount - a.riderCount)
+  return candidates[0].el
 }
 
 export async function POST(req: Request) {
@@ -147,7 +184,6 @@ export async function POST(req: Request) {
     let targetLabel = ''
 
     if (stageNumber) {
-      // résultat d’étape
       const { data: stageRow, error: stageErr } = await supabaseAdmin
         .from('stages')
         .select('id, stage_number, name')
@@ -170,12 +206,10 @@ export async function POST(req: Request) {
       targetUrl = `${raceBaseUrl}/stage-${stageNumber}/result`
       targetLabel = `stage-${stageNumber}`
     } else if (gcMode) {
-      // général
       targetStageId = null
       targetUrl = `${raceBaseUrl}/gc`
       targetLabel = 'gc'
     } else {
-      // course d’un jour ou fallback classique
       targetStageId = null
       targetUrl = `${raceBaseUrl}/result`
       targetLabel = 'result'
@@ -196,12 +230,14 @@ export async function POST(req: Request) {
     }
 
     const $ = cheerio.load(resp.html)
+    const bestTable = findBestResultsTable($)
 
-    let table = $('table.basic').first()
-    if (!table.length) table = $('table').first()
-
-    let links = table.find('a[href*="/rider/"]')
-    if (!links.length) links = $('a[href*="/rider/"]')
+    let links: cheerio.Cheerio<any>
+    if (bestTable) {
+      links = $(bestTable).find('a[href*="/rider/"]')
+    } else {
+      links = $('a[href*="/rider/"]')
+    }
 
     // ---- Replace old results
     if (targetStageId) {
@@ -222,7 +258,6 @@ export async function POST(req: Request) {
     const seen = new Set<string>()
     let firstMissingRider: string | null = null
 
-    // on prend max top 50
     for (let i = 0; i < links.length && imported < 50; i++) {
       const a = links.eq(i)
       const pcsRiderUrl = absPcsUrl(String(a.attr('href') || ''))
@@ -234,7 +269,7 @@ export async function POST(req: Request) {
       const tr = a.closest('tr')
       let pos: number | null = null
 
-      const tds = tr.find('td')
+      const tds = tr.find('td,th')
       for (let k = 0; k < tds.length; k++) {
         const t = normalizeSpace($(tds.get(k)).text())
         const m = t.match(/^(\d{1,3})$/)
@@ -300,6 +335,7 @@ export async function POST(req: Request) {
         linksFound: links.length,
         uniqueRiderLinks: seen.size,
         firstMissingRider,
+        usedBestTable: !!bestTable,
       },
     })
   } catch (e: any) {
