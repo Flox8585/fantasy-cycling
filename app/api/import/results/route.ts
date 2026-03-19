@@ -25,7 +25,7 @@ function normalizeInputUrl(input: string) {
   url = url.replace('https://procyclingstats.com', 'https://www.procyclingstats.com')
   url = url.replace('http://www.procyclingstats.com', 'https://www.procyclingstats.com')
 
-  // on retire seulement /result final éventuel
+  // on retire seulement /result éventuel
   // IMPORTANT: on garde /gc et /stage-x
   url = url.replace(/\/result\/?$/i, '')
 
@@ -48,6 +48,7 @@ function isGcUrl(url: string) {
 
 async function fetchHtml(url: string) {
   const browser = await chromium.launch({ headless: true })
+
   try {
     const page = await browser.newPage()
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
@@ -81,9 +82,8 @@ async function fetchHtml(url: string) {
 }
 
 function findBestResultsTable($: cheerio.CheerioAPI) {
-  const candidates: { el: cheerio.Element; riderCount: number }[] = []
+  const candidates: { el: any; riderCount: number }[] = []
 
-  // on privilégie les zones centrales
   const scopes = [
     $('main').first(),
     $('div.content').first(),
@@ -118,7 +118,6 @@ function findBestResultsTable($: cheerio.CheerioAPI) {
 
 export async function POST(req: Request) {
   try {
-    // ---- Auth
     const supabase = await createSupabaseServerClient()
     const {
       data: { user },
@@ -137,7 +136,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Not allowed' }, { status: 403 })
     }
 
-    // ---- Input
     const body = await req.json().catch(() => ({}))
     const pcsUrlRaw = String(body?.pcsUrl ?? body?.url ?? '').trim()
 
@@ -158,7 +156,6 @@ export async function POST(req: Request) {
     const stageNumber = parseStageNumber(inputUrl)
     const gcMode = isGcUrl(inputUrl)
 
-    // ---- Find race in DB
     const { data: raceRow, error: raceLookupErr } = await supabaseAdmin
       .from('races')
       .select('id, pcs_url, name, pcs_is_stage_race')
@@ -178,7 +175,6 @@ export async function POST(req: Request) {
 
     const raceId = raceRow.id as string
 
-    // ---- Target type
     let targetUrl = ''
     let targetStageId: string | null = null
     let targetLabel = ''
@@ -215,7 +211,6 @@ export async function POST(req: Request) {
       targetLabel = 'result'
     }
 
-    // ---- Fetch result page
     const resp = await fetchHtml(targetUrl)
 
     if (resp.looksBlocked) {
@@ -239,7 +234,6 @@ export async function POST(req: Request) {
       links = $('a[href*="/rider/"]')
     }
 
-    // ---- Replace old results
     if (targetStageId) {
       await supabaseAdmin
         .from('results')
